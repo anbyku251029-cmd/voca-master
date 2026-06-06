@@ -1,5 +1,5 @@
 """
-🚀 ANTIGRAVITY — 망각의 중력을 거스르는 수능 영단어 앱 (v3.0)
+🚀 ANTIGRAVITY — 망각의 중력을 거스르는 수능 영단어 앱 (v3.5)
 ===========================================================
 기술 스택 : Python 3.10+ · Streamlit · SQLite3
 실행 방법 : streamlit run app.py
@@ -37,7 +37,7 @@ STRIP_GRADS = [
 ]
 
 # ══════════════════════════════════════════════════════════════════
-#  ③ DATABASE LAYER & 3,000단어 대량 더미 데이터 구축
+#  ③ DATABASE LAYER & Spaced Repetition (복습 주기) 스키마 연동
 # ══════════════════════════════════════════════════════════════════
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))
@@ -45,8 +45,9 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 def init_db() -> None:
+    today_str = str(date.today())
     with get_conn() as conn:
-        conn.executescript("""
+        conn.executescript(f"""
             CREATE TABLE IF NOT EXISTS words (
                 word_id        INTEGER PRIMARY KEY AUTOINCREMENT,
                 english        TEXT    NOT NULL UNIQUE,
@@ -66,14 +67,23 @@ def init_db() -> None:
                 flashcard_cleared INTEGER  DEFAULT 0,
                 quiz_passed       INTEGER  DEFAULT 0,
                 wrong_count       INTEGER  DEFAULT 0,
+                next_review_date  TEXT     DEFAULT '{today_str}',
                 last_studied_at   DATETIME DEFAULT CURRENT_TIMESTAMP
             );
         """)
         
-        # 현재 DB 단어 개수 체크
+        # next_review_date 컬럼 추가 방어코드 (스키마 확장)
+        try:
+            conn.execute(f"ALTER TABLE user_progress ADD COLUMN next_review_date TEXT DEFAULT '{today_str}'")
+        except sqlite3.OperationalError:
+            pass # 이미 존재함
+
+        # NULL 값 방어 초기화 (기존 데이터 보정)
+        conn.execute(f"UPDATE user_progress SET next_review_date = '{today_str}' WHERE next_review_date IS NULL")
+
+        # 60일치 x 일일 50개 = 3,000개 고속 대량 더미 단어 생성
         count = conn.execute("SELECT COUNT(*) FROM words").fetchone()[0]
         if count < 3000:
-            # 60일치 x 일일 50개 = 3,000개 고속 대량 더미 단어 생성
             poses = ["형용사", "동사", "명사", "부사"]
             emojis = ["✨", "⛔", "🌫️", "🌍", "🔄", "⏩", "⚡", "💡", "📉", "🔬", "🚀", "🚧", "🌟", "🌑", "🌊"]
             
@@ -129,7 +139,7 @@ def load_words(day_number: int) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT w.*, p.study_status, p.skimming_result,
-                   p.flashcard_cleared, p.quiz_passed, p.wrong_count
+                   p.flashcard_cleared, p.quiz_passed, p.wrong_count, p.next_review_date
             FROM   words w
             JOIN   user_progress p ON w.word_id = p.word_id
             WHERE  w.day_number = ?
@@ -137,8 +147,41 @@ def load_words(day_number: int) -> list[dict]:
         """, (day_number,)).fetchall()
     return [dict(r) for r in rows]
 
+def load_review_words(today_date_str: str, current_day: int) -> list[dict]:
+    """과거 단어 중 복습 기한이 도래했거나 지난 단어들 반환 (현재 선택한 Day의 신규 단어 제외)"""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT w.*, p.study_status, p.skimming_result,
+                   p.flashcard_cleared, p.quiz_passed, p.wrong_count, p.next_review_date
+            FROM   words w
+            JOIN   user_progress p ON w.word_id = p.word_id
+            WHERE  p.next_review_date <= ? AND w.day_number != ? AND p.wrong_count > 0
+            ORDER  BY w.word_id
+        """, (today_date_str, current_day)).fetchall()
+    return [dict(r) for r in rows]
+
+def load_today_words(day_number: int) -> tuple[list[dict], list[dict]]:
+    """오늘의 Day 신규 단어 50개와 복습 오답 단어 목록을 각각 반환"""
+    day_words = load_words(day_number)
+    today_str = str(date.today())
+    review_words = load_review_words(today_str, day_number)
+    return day_words, review_words
+
+def load_tomorrow_review_words() -> list[dict]:
+    """내일 복습이 예정된 단어들(next_review_date가 내일 날짜인 것) 반환"""
+    tomorrow_str = str(date.today() + timedelta(days=1))
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT w.word_id, w.english, w.korean, w.part_of_speech, w.emoji,
+                   p.wrong_count, p.next_review_date
+            FROM   words w
+            JOIN   user_progress p ON w.word_id = p.word_id
+            WHERE  p.next_review_date = ? AND p.study_status != 'unseen'
+            ORDER  BY w.english ASC
+        """, (tomorrow_str,)).fetchall()
+    return [dict(r) for r in rows]
+
 def calc_completed_days() -> int:
-    """모든 단어가 completed(완료) 처리된 Day의 총 개수 계산"""
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT w.day_number, 
@@ -161,31 +204,47 @@ def calc_progress_pct() -> float:
 
 def db_set_skimming(word_id: int, result: str) -> None:
     status = "know" if result == "know" else "unknown"
+    today = date.today()
+    # 알아요: 오늘 + 10일 후, 몰라요: 오늘 + 1일 후 (Spaced Repetition 알고리즘)
+    next_date = today + timedelta(days=10) if result == "know" else today + timedelta(days=1)
+    next_date_str = str(next_date)
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE user_progress SET skimming_result=?,study_status=? WHERE word_id=?",
-            (result, status, word_id),
-        )
-
-def db_set_flashcard(word_id: int, cleared: bool) -> None:
-    status = "reviewing" if cleared else "unknown"
-    with get_conn() as conn:
-        conn.execute(
-            "UPDATE user_progress SET flashcard_cleared=?,study_status=? WHERE word_id=?",
-            (1 if cleared else 0, status, word_id),
-        )
-
-def db_set_quiz(word_id: int, passed: bool) -> None:
-    with get_conn() as conn:
-        if passed:
+        if result == "unknown":
             conn.execute(
-                "UPDATE user_progress SET quiz_passed=1,study_status='completed' WHERE word_id=?",
-                (word_id,),
+                "UPDATE user_progress SET skimming_result=?, study_status=?, next_review_date=?, wrong_count=wrong_count+1 WHERE word_id=?",
+                (result, status, next_date_str, word_id),
             )
         else:
             conn.execute(
-                "UPDATE user_progress SET wrong_count=wrong_count+1,study_status='needs_retry' WHERE word_id=?",
-                (word_id,),
+                "UPDATE user_progress SET skimming_result=?, study_status=?, next_review_date=? WHERE word_id=?",
+                (result, status, next_date_str, word_id),
+            )
+
+def db_set_flashcard(word_id: int, cleared: bool) -> None:
+    status = "reviewing" if cleared else "unknown"
+    today = date.today()
+    next_date = today + timedelta(days=10) if cleared else today + timedelta(days=1)
+    next_date_str = str(next_date)
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE user_progress SET flashcard_cleared=?, study_status=?, next_review_date=? WHERE word_id=?",
+            (1 if cleared else 0, status, next_date_str, word_id),
+        )
+
+def db_set_quiz(word_id: int, passed: bool) -> None:
+    today = date.today()
+    next_date = today + timedelta(days=10) if passed else today + timedelta(days=1)
+    next_date_str = str(next_date)
+    with get_conn() as conn:
+        if passed:
+            conn.execute(
+                "UPDATE user_progress SET quiz_passed=1, study_status='completed', next_review_date=? WHERE word_id=?",
+                (next_date_str, word_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE user_progress SET wrong_count=wrong_count+1, study_status='needs_retry', next_review_date=? WHERE word_id=?",
+                (next_date_str, word_id),
             )
 
 def load_wrong_words() -> list[dict]:
@@ -193,7 +252,7 @@ def load_wrong_words() -> list[dict]:
         rows = conn.execute("""
             SELECT w.word_id, w.english, w.korean, w.part_of_speech,
                    w.example_en, w.example_ko, w.emoji,
-                   p.wrong_count, p.study_status
+                   p.wrong_count, p.study_status, p.next_review_date
             FROM   words w
             JOIN   user_progress p ON w.word_id = p.word_id
             WHERE  p.wrong_count > 0
@@ -228,19 +287,23 @@ def get_stats_data() -> dict:
     }
 
 def db_reset_today(day_number: int) -> None:
+    today_str = str(date.today())
     with get_conn() as conn:
         conn.execute("""
             UPDATE user_progress
             SET study_status='unseen',skimming_result='pending',
-                flashcard_cleared=0,quiz_passed=0,wrong_count=0
+                flashcard_cleared=0,quiz_passed=0,wrong_count=0,
+                next_review_date=?
             WHERE word_id IN (SELECT word_id FROM words WHERE day_number=?)
-        """, (day_number,))
+        """, (today_str, day_number))
 
 def db_reset_wrong_count(word_id: int) -> None:
+    next_date = date.today() + timedelta(days=10)
+    next_date_str = str(next_date)
     with get_conn() as conn:
         conn.execute(
-            "UPDATE user_progress SET wrong_count=0, study_status='completed' WHERE word_id=?",
-            (word_id,),
+            "UPDATE user_progress SET wrong_count=0, study_status='completed', next_review_date=? WHERE word_id=?",
+            (next_date_str, word_id),
         )
 
 # ══════════════════════════════════════════════════════════════════
@@ -252,6 +315,7 @@ def init_session() -> None:
         "active_tab":     "home",
         "current_day":    1,
         "all_words":      [],
+        "review_words_count": 0,
         # skimming
         "skim_index":     0,
         "skim_page":      0,
@@ -280,6 +344,12 @@ def init_session() -> None:
 def reset_all_session() -> None:
     ss = st.session_state
     day = ss.get("current_day", 1)
+    
+    # 50개 단어 + 누적 복습 대상 오답 단어를 합쳐서 로드
+    day_words, review_words = load_today_words(day)
+    ss.all_words = day_words + review_words
+    ss.review_words_count = len(review_words)
+    
     keys = {
         "skim_index": 0, "skim_page": 0, "skim_states": {}, "unknown_ids": [],
         "skimming_done": False, "all_mastered": False,
@@ -291,7 +361,6 @@ def reset_all_session() -> None:
     }
     for k, v in keys.items():
         ss[k] = v
-    ss.all_words = load_words(day)
 
 # ══════════════════════════════════════════════════════════════════
 #  ⑥ GLOBAL CSS (PREMIUM DARK GLASSMORPHISM STYLE)
@@ -541,8 +610,6 @@ html, body, [class*="css"] {
 }
 .ws-emoji {
     font-size: 1.6rem;
-    position: relative;
-    z-index: 1;
 }
 .ws-en {
     font-size: 0.62rem;
@@ -824,6 +891,7 @@ html, body, [class*="css"] {
     display: flex;
     align-items: center;
     gap: 14px;
+    transition: border-color 0.2s;
 }
 .wn-emoji { font-size: 1.8rem; }
 .wn-info { flex-grow: 1; min-width: 0; }
@@ -905,7 +973,7 @@ html, body, [class*="css"] {
     font-size: 0.88rem;
     font-weight: 800;
     text-decoration: none !important;
-    background: rgba(255,255,255,0.02);
+    background: rgba(255, 255, 255, 0.02);
     border: 1px solid rgba(255, 255, 255, 0.04);
     transition: all 0.2s;
 }
@@ -1029,7 +1097,6 @@ def render_word_grid(words: list[dict]) -> str:
     html = '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px;">'
     for w in shown:
         en = w.get("english", "")
-        # '_' 이후의 숫자를 잘라내어 프리미엄 표시 (더미데이터용)
         display_en = en.split("_")[0]
         html += f"""
         <div style="
@@ -1116,11 +1183,27 @@ def page_home() -> None:
     ss = st.session_state
     progress_pct = calc_progress_pct()
     
-    # ── 학습할 Day 선택 (60일치 셀렉트박스 연동) ────────────────
-    day_options = [f"Day {i}" for i in range(1, 61)]
-    
     # 상단 대시보드 렌더링
     render_top_header(progress_pct, ss.current_day)
+
+    # 🔄 스마트 복습 주기 알림 배너 노출 ───────────────────
+    review_cnt = ss.get("review_words_count", 0)
+    if review_cnt > 0:
+        st.markdown(f"""
+<div style="background: rgba(96, 165, 250, 0.12);
+            border: 1px solid rgba(96, 165, 250, 0.35);
+            border-radius: 16px;
+            padding: 14px 18px;
+            margin-bottom: 18px;
+            display: flex;
+            align-items: center;
+            gap: 12px;">
+    <span style="font-size: 1.8rem;">🔄</span>
+    <div>
+        <div style="color: #60a5fa; font-weight: 800; font-size: 0.95rem;">오늘 복습해야 할 오답 단어가 {review_cnt}개 있습니다!</div>
+        <div style="color: #8b949e; font-size: 0.78rem; margin-top: 2px;">과거에 틀렸던 단어가 망각곡선 스케줄러에 따라 오늘 공부 목록에 추가되었습니다.</div>
+    </div>
+</div>""", unsafe_allow_html=True)
 
     # 마스터 축하 배너
     if ss.get("all_mastered", False):
@@ -1137,8 +1220,9 @@ def page_home() -> None:
     <div style="color: #e6edf3; font-size: 0.85rem; margin-top: 6px;">Day {}의 모든 단어를 정복하셨습니다. 다음 날짜에 도전하세요! 🚀</div>
 </div>""".format(ss.current_day), unsafe_allow_html=True)
 
-    # 1. 학습할 Day 골라 세팅
+    # 학습할 Day 선택
     st.markdown('<div class="sec-lbl">🎯 커리큘럼 선택</div>', unsafe_allow_html=True)
+    day_options = [f"Day {i}" for i in range(1, 61)]
     selected_day_str = st.selectbox(
         "학습할 Day를 골라주세요",
         options=day_options,
@@ -1147,17 +1231,15 @@ def page_home() -> None:
     )
     selected_day = int(selected_day_str.split(" ")[-1])
     
-    # Day 변경 시 안정적인 세션 리셋
     if selected_day != ss.current_day:
         ss.current_day = selected_day
         reset_all_session()
         st.rerun()
 
-    # 단어 로드
     words = ss.all_words
-    total_day_words = len(words)  # 50개
+    total_words = len(words)
 
-    st.markdown('<div class="sec-lbl">📅 오늘의 학습 진행 현황 (총 {}단어)</div>'.format(total_day_words), unsafe_allow_html=True)
+    st.markdown('<div class="sec-lbl">📅 오늘의 학습 진행 현황 (총 {}단어)</div>'.format(total_words), unsafe_allow_html=True)
 
     # 1. 스키밍 단계 카드
     skim_done = ss.skimming_done
@@ -1176,20 +1258,14 @@ def page_home() -> None:
         </div>
         <div class="pc-prog"><div class="pc-prog-fill" style="width:{prog_fill}"></div></div>
         <div class="pc-meta">{skim_status}<span class="pc-time">~10분</span></div>
-        <div class="pc-desc">오늘의 50단어를 10개씩 분류하며 아는 단어와 모르는 단어를 걸러냅니다.</div>
+        <div class="pc-desc">오늘의 단어를 10개씩 분류하며 아는 단어와 모르는 단어를 걸러냅니다.</div>
     </div>
 </div>""", unsafe_allow_html=True)
 
     if not skim_done:
         if st.button("바로 시작", use_container_width=True, type="primary", key="go_skim"):
             db_reset_today(ss.current_day)
-            ss.all_words = load_words(ss.current_day)
-            ss.skim_index = 0
-            ss.skim_page = 0
-            ss.skim_states = {w["word_id"]: "pending" for w in ss.all_words}
-            ss.unknown_ids = []
-            ss.skimming_done = False
-            ss.all_mastered = False
+            reset_all_session()
             ss.page = "skimming"
             st.rerun()
     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
@@ -1263,7 +1339,6 @@ def page_home() -> None:
             ss.page = "quiz"
             st.rerun()
 
-    # ── 데이터 엑셀/CSV 업로드 가이드라인 확장성 추가 ────────────────
     st.markdown("<hr>", unsafe_allow_html=True)
     with st.expander("📂 대량 단어 엑셀/CSV 데이터 업로드"):
         st.info(" Day 1~60번 대량 단어를 CSV 파일로 로드할 수 있는 기능 템플릿입니다.")
@@ -1274,12 +1349,12 @@ def page_home() -> None:
     render_bottom_nav("home")
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑨ PAGE: SKIMMING (10-WORDS PAGINATION OPTIMIZED FOR MOBILE)
+#  ⑨ PAGE: SKIMMING (10-WORDS PAGINATION)
 # ══════════════════════════════════════════════════════════════════
 def page_skimming() -> None:
     ss = st.session_state
     words = ss.all_words
-    total = len(words)  # 50개
+    total = len(words)
 
     if total == 0:
         ss.skimming_done = True
@@ -1287,7 +1362,6 @@ def page_skimming() -> None:
         st.rerun()
         return
 
-    # 세션 상태 방어 코드
     if not ss.skim_states:
         ss.skim_states = {w["word_id"]: "pending" for w in words}
     if "skim_page" not in ss:
@@ -1304,13 +1378,11 @@ def page_skimming() -> None:
     with c_title:
         st.markdown(f'<div style="color:#ffffff;font-weight:800;font-size:1.05rem;padding-top:4px;">🔍 스키밍 — Day {ss.current_day}</div>', unsafe_allow_html=True)
 
-    # 10개 슬라이싱 계산
     ITEMS_PER_PAGE = 10
     start_idx = ss.skim_page * ITEMS_PER_PAGE
     end_idx = min(start_idx + ITEMS_PER_PAGE, total)
     page_words = words[start_idx:end_idx]
 
-    # 집계 통계
     know_n = sum(1 for v in states.values() if v == "know")
     unknown_n = sum(1 for v in states.values() if v == "unknown")
     pending_n = sum(1 for v in states.values() if v == "pending")
@@ -1333,9 +1405,8 @@ def page_skimming() -> None:
 
     classified_n = know_n + unknown_n
     st.progress(classified_n / total if total else 0.0)
-    st.markdown(f'<div style="color:#8b949e;font-size:0.75rem;margin:4px 0 14px">{ss.skim_page + 1} / 5 페이지 ({start_idx+1}~{end_idx}번째 단어) · 전체 {classified_n}/{total} 분류 완료</div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="color:#8b949e;font-size:0.75rem;margin:4px 0 14px">{ss.skim_page + 1} / {(total-1)//10 + 1} 페이지 ({start_idx+1}~{end_idx}번째 단어) · 전체 {classified_n}/{total} 분류 완료</div>', unsafe_allow_html=True)
 
-    # 모바일용 가로 2열 배치 그리드
     COLS_PER_ROW = 2
     for r_idx in range(0, len(page_words), COLS_PER_ROW):
         grid_cols = st.columns(COLS_PER_ROW, gap="small")
@@ -1347,11 +1418,9 @@ def page_skimming() -> None:
             wid = word["word_id"]
             state = states.get(wid, "pending")
             emoji = word.get("emoji", "📚")
-            # '_' 이후의 숫자 제거 및 노출
             english_display = word["english"].split("_")[0]
             state_icon = {"know": "✅", "unknown": "📌", "pending": ""}.get(state, "")
 
-            # 분류 상태별 동적 배경/테두리
             bg_style = "background: rgba(22, 30, 49, 0.5);"
             border_style = "border: 1px solid rgba(255, 255, 255, 0.06);"
             if state == "know":
@@ -1389,23 +1458,21 @@ def page_skimming() -> None:
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    # 10개 단위 페이지네이션 제어
     p1, p2 = st.columns(2)
     with p1:
         if st.button("← 이전 10개", key="prev_page", use_container_width=True, disabled=(ss.skim_page == 0)):
             ss.skim_page -= 1
             st.rerun()
     with p2:
-        if st.button("다음 10개 →", key="next_page", use_container_width=True, disabled=(ss.skim_page == 4 or end_idx >= total)):
+        if st.button("다음 10개 →", key="next_page", use_container_width=True, disabled=(end_idx >= total)):
             ss.skim_page += 1
             st.rerun()
 
-    # 스키밍 최종 완료
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
     all_classified = all(v != "pending" for v in states.values())
     
     if not all_classified:
-        st.markdown(f'<div style="color:#8b949e;font-size:0.8rem;text-align:center;margin-bottom:10px">⚠️ 50개 단어를 모두 분류해야 완료할 수 있습니다. (남은 미분류: {pending_n}개)</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="color:#8b949e;font-size:0.8rem;text-align:center;margin-bottom:10px">⚠️ {total}개 단어를 모두 분류해야 완료할 수 있습니다. (남은 미분류: {pending_n}개)</div>', unsafe_allow_html=True)
 
     if st.button(f"선택 완료 및 학습 시작 🚀 (몰라요 {unknown_n}개)", use_container_width=True, type="primary", disabled=not all_classified):
         for w in words:
@@ -1413,7 +1480,9 @@ def page_skimming() -> None:
             db_set_skimming(w["word_id"], res)
 
         ss.unknown_ids = [wid for wid, s in states.items() if s == "unknown"]
-        ss.all_words = load_words(ss.current_day)
+        # 동적으로 리스트 새로고침
+        day_words, review_words = load_today_words(ss.current_day)
+        ss.all_words = day_words + review_words
         ss.skimming_done = True
         
         if not ss.unknown_ids:
@@ -1423,7 +1492,6 @@ def page_skimming() -> None:
             ss.page = "home"
         else:
             ss.all_mastered = False
-            # 플래시카드로 바로 진입
             ss.page = "flashcard"
             ss.fc_index = 0
             ss.fc_show_meaning = False
@@ -1480,10 +1548,7 @@ def page_flashcard() -> None:
     emoji = word.get("emoji", "📚")
     english_display = word['english'].split("_")[0]
     korean_display = word['korean'].split("_")[0]
-    example_en_display = word['example_en']
-    example_ko_display = word['example_ko']
 
-    # 플래시카드 렌더링
     st.markdown(f"""
 <div class="fc-card">
     <div class="fc-img" style="background: linear-gradient(160deg, #1f2937, #111827); border-bottom: 1px solid rgba(255,255,255,0.06);">
@@ -1503,8 +1568,8 @@ def page_flashcard() -> None:
         <div class="fc-meaning">
             <div class="fc-ko">{korean_display}</div>
             <div class="fc-example">
-                {example_en_display}
-                <span class="fc-ex-ko">{example_ko_display}</span>
+                {word['example_en']}
+                <span class="fc-ex-ko">{word['example_ko']}</span>
             </div>
         </div>""", unsafe_allow_html=True)
 
@@ -1534,7 +1599,6 @@ def page_flashcard() -> None:
             st.rerun()
 
     dots_html = '<div class="fc-dots">'
-    # 50개 단어로 늘어난 경우 돗 개수 최대 10개만 간접 표시
     shown_dots = min(total, 10)
     for i in range(shown_dots):
         cls = "active" if i == idx else ("cleared" if i in ss.fc_visited else "")
@@ -1571,12 +1635,16 @@ def page_flashcard() -> None:
 # ══════════════════════════════════════════════════════════════════
 NUMS = ["①", "②", "③", "④"]
 
-def _build_choices(word: dict, all_words: list[dict]) -> tuple[list[str], str]:
+def _build_choices(word: dict) -> tuple[list[str], str]:
     answer = word["korean"].split("_")[0]
-    # 오답 풀을 구성 (Day 전체 단어에서 다른 단어 뜻 3개 추출)
-    pool = list(set([w["korean"].split("_")[0] for w in all_words if w["word_id"] != word["word_id"] and w["korean"].split("_")[0] != answer]))
-    
-    # 만약 풀이 부족할 경우 대비
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT DISTINCT korean
+            FROM words
+            WHERE word_id != ?
+        """, (word["word_id"],)).fetchall()
+        
+    pool = list(set([r["korean"].split("_")[0] for r in rows if r["korean"].split("_")[0] != answer]))
     if len(pool) < 3:
          pool = pool + ["선물", "진동", "의무", "환경"]
          
@@ -1659,7 +1727,7 @@ def page_quiz() -> None:
     word = word_map.get(current_id)
 
     if not ss.quiz_choices:
-        choices, answer = _build_choices(word, ss.all_words)
+        choices, answer = _build_choices(word)
         ss.quiz_choices = choices
         ss.quiz_answer = answer
         ss.quiz_answered = False
@@ -1725,7 +1793,7 @@ def page_quiz() -> None:
             st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑫ PAGE: LIBRARY (오답 노트 & 마스터)
+#  ⑫ PAGE: LIBRARY (오답 노트 & 내일 복습 예고)
 # ══════════════════════════════════════════════════════════════════
 def page_library() -> None:
     ss = st.session_state
@@ -1795,11 +1863,36 @@ def page_library() -> None:
 
                 if st.button("다시 외웠어요 완료 ✅", key=f"master_{wid}", use_container_width=True):
                     db_reset_wrong_count(wid)
-                    ss.all_words = load_words(ss.current_day)
+                    day_words, review_words = load_today_words(ss.current_day)
+                    ss.all_words = day_words + review_words
+                    ss.review_words_count = len(review_words)
                     st.rerun()
                 st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+        
+        # ── 📅 내일 복습 예정인 단어 예고 영역 추가 ──────────────────
+        tomorrow_words = load_tomorrow_review_words()
+        st.markdown("<hr>", unsafe_allow_html=True)
+        st.markdown(f'<div style="color:#ffffff;font-weight:900;font-size:1.1rem;margin-bottom:12px;">📅 내일 복습 예정인 단어 ({len(tomorrow_words)}개)</div>', unsafe_allow_html=True)
+        
+        if len(tomorrow_words) == 0:
+            st.markdown('<div class="wn-empty" style="padding: 24px;"><div style="font-size:1.5rem;margin-bottom:6px">🌅</div><div>내일 복습이 예정된 단어가 없습니다.</div></div>', unsafe_allow_html=True)
+        else:
+            for tw in tomorrow_words:
+                pos_css, _, _ = _pos_style(tw["part_of_speech"])
+                en_clean = tw['english'].split("_")[0]
+                ko_clean = tw['korean'].split("_")[0]
+                st.markdown(f"""
+<div class="wn-card" style="border-color: rgba(96,165,250,0.15); background: rgba(13, 20, 35, 0.4); margin-bottom: 8px;">
+    <span class="wn-emoji">{tw['emoji']}</span>
+    <div class="wn-info">
+        <span class="wn-en" style="color:#60a5fa;">{en_clean}</span>
+        <span class="wn-ko">{ko_clean}</span>
+        <div class="wn-pos" style="{pos_css}">{tw['part_of_speech']}</div>
+    </div>
+    <span class="wn-wrong-badge" style="background:rgba(96,165,250,0.08); color:#60a5fa; border-color:rgba(96,165,250,0.2);">내일 복습</span>
+</div>""", unsafe_allow_html=True)
+
     else:
-        # 현재 선택된 Day의 전체 단어 리스트 노출
         all_words_list = load_words(ss.current_day)
         st.markdown(f'<div style="color:#ffffff;font-weight:900;margin:16px 0 10px;font-size:1.1rem">Day {ss.current_day} 단어 목록 ({len(all_words_list)}개)</div>', unsafe_allow_html=True)
         for w in all_words_list:
@@ -1880,7 +1973,7 @@ def page_stats() -> None:
     render_bottom_nav("stats")
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑭ MAIN ROUTER & STABILITY CHECK
+#  ⑭ MAIN ROUTER
 # ══════════════════════════════════════════════════════════════════
 def main() -> None:
     init_db()
@@ -1889,9 +1982,10 @@ def main() -> None:
 
     ss = st.session_state
     
-    # 단어 목록 최초 로드 방어
     if not ss.all_words:
-        ss.all_words = load_words(ss.current_day)
+        day_words, review_words = load_today_words(ss.current_day)
+        ss.all_words = day_words + review_words
+        ss.review_words_count = len(review_words)
 
     p = ss.page
     if p == "home":
