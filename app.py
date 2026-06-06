@@ -160,6 +160,19 @@ def load_review_words(today_date_str: str, current_day: int) -> list[dict]:
         """, (today_date_str, current_day)).fetchall()
     return [dict(r) for r in rows]
 
+def load_all_review_words(today_date_str: str) -> list[dict]:
+    """Day 번호와 관계없이 DB 전체에서 복습 기한이 도래한 과거 오답 단어들 반환"""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT w.*, p.study_status, p.skimming_result,
+                   p.flashcard_cleared, p.quiz_passed, p.wrong_count, p.next_review_date
+            FROM   words w
+            JOIN   user_progress p ON w.word_id = p.word_id
+            WHERE  p.next_review_date <= ? AND p.wrong_count > 0
+            ORDER  BY w.word_id
+        """, (today_date_str,)).fetchall()
+    return [dict(r) for r in rows]
+
 def load_today_words(day_number: int) -> tuple[list[dict], list[dict]]:
     """오늘의 Day 신규 단어 50개와 복습 오답 단어 목록을 각각 반환"""
     day_words = load_words(day_number)
@@ -1186,6 +1199,41 @@ def page_home() -> None:
     # 상단 대시보드 렌더링
     render_top_header(progress_pct, ss.current_day)
 
+    # 🚨 실시간 외워야 할 오답 개수 및 복습 버튼 추가 ───────────────────
+    today_str = str(date.today())
+    all_review_words = load_all_review_words(today_str)
+    review_count = len(all_review_words)
+    
+    st.markdown(f"""
+    <div style="
+        background: rgba(248, 81, 73, 0.08);
+        border: 1px solid rgba(248, 81, 73, 0.2);
+        border-radius: 18px;
+        padding: 12px 16px;
+        margin-bottom: 16px;
+        text-align: center;
+    ">
+        <span style="color: #ff7b72; font-weight: 800; font-size: 1.05rem; display: block; margin-bottom: 8px;">
+            🚨 현재 외워야 할 오답: {review_count}개
+        </span>
+    </div>""", unsafe_allow_html=True)
+    
+    if st.button("틀린 단어 복습하러 가기 📝", use_container_width=True, type="primary", key="go_review_mode"):
+        if review_count == 0:
+            st.success("지금은 복습할 오답 단어가 없습니다. 완벽해요! 🎉")
+        else:
+            # 오답 복습 모드로 강제 세션 전환
+            ss.all_words = all_review_words
+            ss.unknown_ids = [w["word_id"] for w in all_review_words]
+            ss.skimming_done = True # 스키밍 분류 스킵
+            ss.fc_index = 0
+            ss.fc_visited = set()
+            ss.flashcard_done = False
+            ss.page = "flashcard" # 2단계 플래시카드로 이동
+            st.rerun()
+            
+    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
     # 🔄 스마트 복습 주기 알림 배너 노출 ───────────────────
     review_cnt = ss.get("review_words_count", 0)
     if review_cnt > 0:
@@ -1716,6 +1764,7 @@ def page_quiz() -> None:
 
         st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
         if st.button("홈으로 이동하여 완료", use_container_width=True, type="primary"):
+            reset_all_session()
             ss.page = "home"
             st.rerun()
         return
