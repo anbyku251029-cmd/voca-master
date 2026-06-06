@@ -203,6 +203,16 @@ def db_reset_today() -> None:
             WHERE word_id IN (SELECT word_id FROM words WHERE day_number=1)
         """)
 
+
+def db_reset_wrong_count(word_id: int) -> None:
+    """오답 마스터(다시 외웠어요) 완료 시 wrong_count 초기화 및 완료 처리"""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE user_progress SET wrong_count=0, study_status='completed' WHERE word_id=?",
+            (word_id,),
+        )
+
+
 # ══════════════════════════════════════════════════════════════════
 #  ⑤ SESSION STATE SYSTEM
 # ══════════════════════════════════════════════════════════════════
@@ -1315,10 +1325,16 @@ def page_skimming() -> None:
             ss.flashcard_done = True
             ss.quiz_done = True
             ss.all_mastered = True
+            ss.page = "home"
         else:
             ss.all_mastered = False
+            # 플래시카드로 바로 진입!
+            ss.page = "flashcard"
+            ss.fc_index = 0
+            ss.fc_show_meaning = False
+            ss.fc_visited = set()
+            ss.flashcard_done = False
 
-        ss.page = "home"
         st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
@@ -1336,14 +1352,21 @@ def page_flashcard() -> None:
         st.rerun()
         return
 
+    # 방문한 카드 인덱스 세트 트래킹 (실전 퀴즈 풀기 활성화용)
+    if "fc_visited" not in ss:
+        ss.fc_visited = set()
+
     idx = min(ss.fc_index, total - 1)
     ss.fc_index = idx
+    ss.fc_visited.add(idx)
 
     current_id = word_ids[idx]
     word = word_map.get(current_id)
-    cleared_ids = ss.fc_cleared_ids
-    cleared_n = len(cleared_ids)
-    is_cleared = (current_id in cleared_ids)
+
+    if not word:
+        ss.fc_index = 0
+        st.rerun()
+        return
 
     h1, h2, h3 = st.columns([2, 4, 3])
     with h1:
@@ -1353,22 +1376,22 @@ def page_flashcard() -> None:
     with h2:
         st.markdown('<div style="color:#ffffff;font-weight:800;font-size:1.05rem;padding-top:4px;">🃏 플래시카드</div>', unsafe_allow_html=True)
     with h3:
-        st.markdown(f'<div style="text-align:right"><span class="badge">암기 {cleared_n}/{total}</span></div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="text-align:right"><span class="badge">학습 {len(ss.fc_visited)}/{total}</span></div>', unsafe_allow_html=True)
 
-    st.progress(cleared_n / total if total else 0.0)
-    st.markdown(f'<div style="color:#8b949e;font-size:0.75rem;margin:4px 0 14px">{idx + 1} / {total}번째 단어 {" · ✅ 기억 완료" if is_cleared else ""}</div>', unsafe_allow_html=True)
+    st.progress(len(ss.fc_visited) / total if total else 0.0)
+    st.markdown(f'<div style="color:#8b949e;font-size:0.75rem;margin:4px 0 14px">{idx + 1} / {total}번째 단어 복습 중</div>', unsafe_allow_html=True)
 
     pos = word.get("part_of_speech", "명사")
     pos_css, glow_var, bg_grad = _pos_style(pos)
     emoji = word.get("emoji", "📚")
-    glow_color = glow_var.split(":", 1)[-1]
 
+    # 깔끔한 회색톤 이미지 플레이스홀더 영역 및 발음 레이아웃
     st.markdown(f"""
 <div class="fc-card">
-    <div class="fc-img" style="background:{bg_grad};{glow_var}">
-        <div style="position:absolute;inset:0;background:radial-gradient(ellipse at 50% 40%,{glow_color} 0%,transparent 68%);"></div>
-        <span style="font-size:5.8rem;position:relative;z-index:1;filter:drop-shadow(0 0 20px {glow_color});">{emoji}</span>
-        <span class="fc-img-label">IMAGE MOCKUP</span>
+    <div class="fc-img" style="background: linear-gradient(160deg, #1f2937, #111827); border-bottom: 1px solid rgba(255,255,255,0.06);">
+        <div style="position:absolute;inset:0;background:radial-gradient(circle at 50% 50%, rgba(96,165,250,0.1) 0%, transparent 70%);"></div>
+        <span style="font-size:5.5rem;position:relative;z-index:1;filter:drop-shadow(0 0 16px rgba(96,165,250,0.35));">{emoji}</span>
+        <span class="fc-img-label">📷 IMAGE PLACEHOLDER</span>
     </div>
     <div class="fc-body">
         <div class="fc-word-row">
@@ -1377,6 +1400,7 @@ def page_flashcard() -> None:
         </div>
         <div class="fc-pos" style="{pos_css}">{pos}</div>""", unsafe_allow_html=True)
 
+    # 뜻 / 예문 토글 영역
     if ss.fc_show_meaning:
         st.markdown(f"""
         <div class="fc-meaning">
@@ -1389,6 +1413,7 @@ def page_flashcard() -> None:
 
     st.markdown("</div></div>", unsafe_allow_html=True)
 
+    # 뜻 보기 / 숨기기 토글 버튼
     if not ss.fc_show_meaning:
         if st.button("👁  뜻 보기", use_container_width=True, key="fc_show"):
             ss.fc_show_meaning = True
@@ -1398,52 +1423,55 @@ def page_flashcard() -> None:
             ss.fc_show_meaning = False
             st.rerun()
 
-        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
-        g1, g2 = st.columns(2)
-        with g1:
-            if st.button("🔄  다시보기", use_container_width=True, key="fc_retry"):
-                db_set_flashcard(current_id, False)
-                if current_id in cleared_ids:
-                    cleared_ids.remove(current_id)
-                ss.fc_show_meaning = False
-                st.rerun()
-        with g2:
-            st.markdown('<div class="btn-clear-active">', unsafe_allow_html=True)
-            if st.button("✅  기억했어요!", use_container_width=True, key="fc_clear"):
-                db_set_flashcard(current_id, True)
-                if current_id not in cleared_ids:
-                    cleared_ids.append(current_id)
-                ss.fc_show_meaning = False
-                ss.fc_index = (idx + 1) % total
-                st.rerun()
-            st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    dots_html = '<div class="fc-dots">'
-    for i in range(total):
-        wid_i = word_ids[i]
-        cls = "active" if i == idx else ("cleared" if wid_i in cleared_ids else "")
-        dots_html += f'<div class="fc-dot {cls}"></div>'
-    dots_html += '</div>'
-    st.markdown(dots_html, unsafe_allow_html=True)
-
+    # 이전 단어 / 다음 단어 네비게이션 버튼
     nav1, nav2 = st.columns(2)
     with nav1:
-        if st.button("← 이전 단어", use_container_width=True, disabled=(idx == 0)):
+        if st.button("← 이전 단어", use_container_width=True, key="fc_prev", disabled=(idx == 0)):
             ss.fc_index = idx - 1
             ss.fc_show_meaning = False
             st.rerun()
     with nav2:
-        if st.button("다음 단어 →", use_container_width=True, disabled=(idx == total - 1)):
+        if st.button("다음 단어 →", use_container_width=True, key="fc_next", disabled=(idx == total - 1)):
             ss.fc_index = idx + 1
             ss.fc_show_meaning = False
             st.rerun()
 
-    if len(cleared_ids) >= total:
-        st.markdown("<hr>", unsafe_allow_html=True)
-        if st.button("🎉  암기 완료! 홈으로 이동", use_container_width=True, type="primary"):
-            ss.flashcard_done = True
-            ss.page = "home"
-            st.rerun()
+    # 점(Dot) 인디케이터
+    dots_html = '<div class="fc-dots">'
+    for i in range(total):
+        cls = "active" if i == idx else ("cleared" if i in ss.fc_visited else "")
+        dots_html += f'<div class="fc-dot {cls}"></div>'
+    dots_html += '</div>'
+    st.markdown(dots_html, unsafe_allow_html=True)
+
+    # 모든 단어(마지막 단어까지 포함) 방문 완료 체크
+    all_visited = (len(ss.fc_visited) >= total)
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+
+    if all_visited:
+        st.markdown("""
+<div style="background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.25); border-radius:16px; padding:12px; text-align:center; margin-bottom:12px;">
+    <span style="color:#60a5fa; font-size:0.85rem; font-weight:700;">🎉 오늘 배울 모든 단어를 한 번씩 확인했습니다!</span>
+</div>""", unsafe_allow_html=True)
+
+    # 실전 퀴즈 풀기 버튼 활성화
+    if st.button("📝 실전 퀴즈 풀기", use_container_width=True, type="primary", disabled=not all_visited):
+        ss.flashcard_done = True
+        
+        q = list(ss.unknown_ids)
+        random.shuffle(q)
+        ss.quiz_queue = q
+        ss.quiz_results = {}
+        ss.quiz_answered = False
+        ss.quiz_choices = []
+        ss.quiz_answer = ""
+        ss.quiz_done = False
+        
+        ss.page = "quiz"
+        st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
 #  ⑪ PAGE: QUIZ (TESTER)
@@ -1581,9 +1609,9 @@ def page_quiz() -> None:
 
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
         if ss.quiz_correct:
-            st.success("🎉 정답입니다! 암기가 우수하게 진행되었습니다.")
+            st.success("정답입니다! 🎉")
         else:
-            st.error(f"❌ 오답입니다. 정답은 '{ss.quiz_answer}' 입니다.")
+            st.error(f"아쉬워요! 정답은 [{ss.quiz_answer}]입니다.")
 
         if st.button("다음 문제로 이동 →", use_container_width=True, type="primary"):
             ss.quiz_queue.pop(0)
@@ -1625,15 +1653,28 @@ def page_library() -> None:
         if total_wrong == 0:
             st.markdown('<div class="wn-empty"><div class="wn-empty-icon">🎉</div><div style="font-weight:800;color:#ffffff;margin-bottom:6px">기록된 오답이 없습니다.</div><div>퀴즈의 오답이 여기에 자동으로 쌓입니다!</div></div>', unsafe_allow_html=True)
         else:
+            # 🔄 오답 단어만 재도전하기 버튼
+            if st.button("🔄  오답 단어만 재도전하기", use_container_width=True, type="primary"):
+                ss.unknown_ids = [w["word_id"] for w in wrong_words]
+                ss.fc_index = 0
+                ss.fc_visited = set()
+                ss.flashcard_done = False
+                ss.skimming_done = True
+                ss.page = "flashcard"
+                st.rerun()
+
+            st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
             max_w = max(w["wrong_count"] for w in wrong_words) if wrong_words else 1
             for w in wrong_words:
+                wid = w["word_id"]
                 cnt = w["wrong_count"]
                 bar_pct = int(cnt / max_w * 100)
                 pos_css, _, _ = _pos_style(w["part_of_speech"])
                 is_retry = (w["study_status"] == "needs_retry")
 
                 st.markdown(f"""
-<div class="wn-card">
+<div class="wn-card" style="margin-bottom:6px;">
     <span class="wn-emoji">{w['emoji']}</span>
     <div class="wn-info">
         <span class="wn-en">{w['english']}</span>
@@ -1648,6 +1689,13 @@ def page_library() -> None:
         {"<span style='color:#f85149;font-size:0.62rem;margin-top:4px;display:block;font-weight:700'>재도전 필요</span>" if is_retry else ""}
     </div>
 </div>""", unsafe_allow_html=True)
+
+                # 개별 오답 마스터 버튼
+                if st.button("다시 외웠어요 완료 ✅", key=f"master_{wid}", use_container_width=True):
+                    db_reset_wrong_count(wid)
+                    ss.all_words = load_words()
+                    st.rerun()
+                st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
     else:
         all_words_list = load_words()
         st.markdown(f'<div style="color:#ffffff;font-weight:900;margin:16px 0 10px;font-size:1.1rem">전체 단어 목록 ({len(all_words_list)}개)</div>', unsafe_allow_html=True)
