@@ -1,5 +1,5 @@
 """
-🚀 ANTIGRAVITY — 망각의 중력을 거스르는 수능 영단어 앱 (v2.1)
+🚀 ANTIGRAVITY — 망각의 중력을 거스르는 수능 영단어 앱 (v3.0)
 ===========================================================
 기술 스택 : Python 3.10+ · Streamlit · SQLite3
 실행 방법 : streamlit run app.py
@@ -28,9 +28,6 @@ DB_PATH = Path(__file__).parent / "antigravity.db"
 SUNEUNG_DATE = date(2027, 11, 18)  # 수능 목표일
 TODAY = date.today()
 D_DAY = max(0, (SUNEUNG_DATE - TODAY).days)
-STUDY_START = date(2026, 1, 10)
-STUDY_DAY = max(1, (TODAY - STUDY_START).days + 1)
-UNKNOWN_TARGET = 5  # 하루 집중 학습 단어 수
 
 WEEKDAYS_KR = ["일", "월", "화", "수", "목", "금", "토"]
 STRIP_GRADS = [
@@ -40,28 +37,7 @@ STRIP_GRADS = [
 ]
 
 # ══════════════════════════════════════════════════════════════════
-#  ③ SEED DATA (고등 수능 필수 영단어 15개)
-# ══════════════════════════════════════════════════════════════════
-SEED_WORDS = [
-    ("pure",       "순수한, 순결한",           "형용사", "Her motives were pure.",                    "그녀의 동기는 순수했다.",             2, "✨"),
-    ("preclude",   "방해하다, 불가능하게 하다", "동사",   "His injury precluded him from running.",    "부상이 그의 달리기를 불가능하게 했다.", 1, "⛔"),
-    ("ambiguous",  "모호한, 불분명한",          "형용사", "The statement was ambiguous.",              "그 진술은 모호했다.",                 2, "🌫️"),
-    ("phenomenon", "현상",                    "명사",   "It is a global phenomenon.",               "그것은 세계적인 현상이다.",            1, "🌍"),
-    ("persist",    "지속하다, 고집하다",        "동사",   "The problem persists.",                    "문제가 지속된다.",                    2, "🔄"),
-    ("subsequent", "그 다음의, 뒤이은",        "형용사", "Subsequent events proved him right.",      "다음 사건이 그가 옳음을 증명했다.",     2, "⏩"),
-    ("inevitable", "불가피한, 필연적인",       "형용사", "Change is inevitable.",                    "변화는 불가피하다.",                  1, "⚡"),
-    ("comprehend", "이해하다, 파악하다",        "동사",   "I could not comprehend the instructions.", "나는 지시를 이해할 수 없었다.",         2, "💡"),
-    ("diminish",   "줄어들다, 감소시키다",      "동사",   "The pain began to diminish.",              "통증이 줄어들기 시작했다.",            2, "📉"),
-    ("elaborate",  "정교한; 상세히 설명하다",   "형용사", "She elaborated on her plan.",              "그녀는 계획을 상세히 설명했다.",        3, "🔬"),
-    ("facilitate", "용이하게 하다, 촉진하다",   "동사",   "Technology facilitates communication.",    "기술은 소통을 용이하게 한다.",          1, "🚀"),
-    ("impede",     "방해하다, 저해하다",        "동사",   "Lack of funds impeded the project.",       "자금 부족이 프로젝트를 저해했다.",      2, "🚧"),
-    ("manifest",   "나타내다; 명백한",          "동사",   "Symptoms manifest differently.",            "증상은 다르게 나타난다.",              2, "🌟"),
-    ("obscure",    "불분명한; 가리다",          "형용사", "The meaning was obscure.",                 "의미가 불분명했다.",                  3, "🌑"),
-    ("profound",   "깊은, 심오한",             "형용사", "He had a profound impact on science.",     "그는 과학에 심오한 영향을 미쳤다.",     1, "🌊"),
-]
-
-# ══════════════════════════════════════════════════════════════════
-#  ④ DATABASE LAYER
+#  ③ DATABASE LAYER & 3,000단어 대량 더미 데이터 구축
 # ══════════════════════════════════════════════════════════════════
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))
@@ -93,38 +69,95 @@ def init_db() -> None:
                 last_studied_at   DATETIME DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        for w in SEED_WORDS:
-            conn.execute(
-                "INSERT OR IGNORE INTO words "
-                "(english,korean,part_of_speech,example_en,example_ko,importance,emoji,day_number) "
-                "VALUES(?,?,?,?,?,?,?,1)",
-                (w[0], w[1], w[2], w[3], w[4], w[5], w[6]),
-            )
+        
+        # 현재 DB 단어 개수 체크
+        count = conn.execute("SELECT COUNT(*) FROM words").fetchone()[0]
+        if count < 3000:
+            # 60일치 x 일일 50개 = 3,000개 고속 대량 더미 단어 생성
+            poses = ["형용사", "동사", "명사", "부사"]
+            emojis = ["✨", "⛔", "🌫️", "🌍", "🔄", "⏩", "⚡", "💡", "📉", "🔬", "🚀", "🚧", "🌟", "🌑", "🌊"]
+            
+            # 단어 조합용 고등 기출 15종 베이스 단어
+            word_bases = [
+                ("pure", "순수한, 순결한"),
+                ("preclude", "방해하다, 불가능하게 하다"),
+                ("ambiguous", "모호한, 불분명한"),
+                ("phenomenon", "현상"),
+                ("persist", "지속하다, 고집하다"),
+                ("subsequent", "그 다음의, 뒤이은"),
+                ("inevitable", "불가피한, 필연적인"),
+                ("comprehend", "이해하다, 파악하다"),
+                ("diminish", "줄어들다, 감소시키다"),
+                ("elaborate", "정교한; 상세히 설명하다"),
+                ("facilitate", "용이하게 하다, 촉진하다"),
+                ("impede", "방해하다, 저해하다"),
+                ("manifest", "나타내다; 명백한"),
+                ("obscure", "불분명한; 가리다"),
+                ("profound", "깊은, 심오한")
+            ]
+            
+            data_to_insert = []
+            word_idx = 1
+            for day in range(1, 61):
+                for in_day in range(1, 51):
+                    base_en, base_ko = word_bases[(word_idx - 1) % len(word_bases)]
+                    english = f"{base_en}_{word_idx}"
+                    korean = f"{base_ko}_{word_idx}"
+                    pos = poses[(word_idx - 1) % len(poses)]
+                    emoji = emojis[(word_idx - 1) % len(emojis)]
+                    example_en = f"This is an example sentence for {english}."
+                    example_ko = f"이것은 {korean}을(를) 위한 수능 예문입니다."
+                    importance = (word_idx % 3) + 1
+                    
+                    data_to_insert.append((english, korean, pos, example_en, example_ko, importance, emoji, day))
+                    word_idx += 1
+            
+            conn.executemany("""
+                INSERT OR IGNORE INTO words 
+                (english, korean, part_of_speech, example_en, example_ko, importance, emoji, day_number)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, data_to_insert)
+            
+        # user_progress 테이블 동기화
         conn.execute("""
             INSERT OR IGNORE INTO user_progress (word_id)
             SELECT word_id FROM words
             WHERE word_id NOT IN (SELECT word_id FROM user_progress)
         """)
 
-def load_words() -> list[dict]:
+def load_words(day_number: int) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT w.*, p.study_status, p.skimming_result,
                    p.flashcard_cleared, p.quiz_passed, p.wrong_count
             FROM   words w
             JOIN   user_progress p ON w.word_id = p.word_id
-            WHERE  w.day_number = 1
+            WHERE  w.day_number = ?
             ORDER  BY w.word_id
-        """).fetchall()
+        """, (day_number,)).fetchall()
     return [dict(r) for r in rows]
 
-def calc_progress_pct() -> float:
+def calc_completed_days() -> int:
+    """모든 단어가 completed(완료) 처리된 Day의 총 개수 계산"""
     with get_conn() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM user_progress").fetchone()[0]
-        done  = conn.execute(
-            "SELECT COUNT(*) FROM user_progress WHERE study_status='completed'"
-        ).fetchone()[0]
-    return (done / total * 100) if total else 0.0
+        rows = conn.execute("""
+            SELECT w.day_number, 
+                   COUNT(w.word_id) as total,
+                   SUM(CASE WHEN p.study_status='completed' THEN 1 ELSE 0 END) as completed
+            FROM   words w
+            JOIN   user_progress p ON w.word_id = p.word_id
+            GROUP  BY w.day_number
+        """).fetchall()
+    
+    comp_days = 0
+    for r in rows:
+        if r["total"] > 0 and r["total"] == r["completed"]:
+            comp_days += 1
+    return comp_days
+
+def calc_progress_pct() -> float:
+    comp_days = calc_completed_days()
+    return (comp_days / 60.0 * 100)
 
 def db_set_skimming(word_id: int, result: str) -> None:
     status = "know" if result == "know" else "unknown"
@@ -194,43 +227,42 @@ def get_stats_data() -> dict:
         "top_wrong": [dict(r) for r in top_wrong]
     }
 
-def db_reset_today() -> None:
+def db_reset_today(day_number: int) -> None:
     with get_conn() as conn:
         conn.execute("""
             UPDATE user_progress
             SET study_status='unseen',skimming_result='pending',
                 flashcard_cleared=0,quiz_passed=0,wrong_count=0
-            WHERE word_id IN (SELECT word_id FROM words WHERE day_number=1)
-        """)
-
+            WHERE word_id IN (SELECT word_id FROM words WHERE day_number=?)
+        """, (day_number,))
 
 def db_reset_wrong_count(word_id: int) -> None:
-    """오답 마스터(다시 외웠어요) 완료 시 wrong_count 초기화 및 완료 처리"""
     with get_conn() as conn:
         conn.execute(
             "UPDATE user_progress SET wrong_count=0, study_status='completed' WHERE word_id=?",
             (word_id,),
         )
 
-
 # ══════════════════════════════════════════════════════════════════
-#  ⑤ SESSION STATE SYSTEM
+#  ⑤ SESSION STATE SYSTEM & DEFENSIVE PROGRAMMING
 # ══════════════════════════════════════════════════════════════════
 def init_session() -> None:
     defaults = {
         "page":           "home",
         "active_tab":     "home",
+        "current_day":    1,
         "all_words":      [],
         # skimming
         "skim_index":     0,
-        "skim_states":    {},   # {word_id: 'know'|'unknown'|'pending'}
+        "skim_page":      0,
+        "skim_states":    {},
         "unknown_ids":    [],
         "skimming_done":  False,
         "all_mastered":   False,
         # flashcard
         "fc_index":       0,
         "fc_show_meaning": False,
-        "fc_cleared_ids": [],
+        "fc_visited":     set(),
         "flashcard_done": False,
         # quiz
         "quiz_queue":     [],
@@ -246,18 +278,20 @@ def init_session() -> None:
             st.session_state[k] = v
 
 def reset_all_session() -> None:
+    ss = st.session_state
+    day = ss.get("current_day", 1)
     keys = {
-        "skim_index": 0, "skim_states": {}, "unknown_ids": [],
+        "skim_index": 0, "skim_page": 0, "skim_states": {}, "unknown_ids": [],
         "skimming_done": False, "all_mastered": False,
-        "fc_index": 0, "fc_show_meaning": False, "fc_cleared_ids": [],
+        "fc_index": 0, "fc_show_meaning": False, "fc_visited": set(),
         "flashcard_done": False,
         "quiz_queue": [], "quiz_results": {}, "quiz_answered": False,
         "quiz_correct": False, "quiz_choices": [], "quiz_answer": "",
         "quiz_done": False,
     }
     for k, v in keys.items():
-        st.session_state[k] = v
-    st.session_state.all_words = load_words()
+        ss[k] = v
+    ss.all_words = load_words(day)
 
 # ══════════════════════════════════════════════════════════════════
 #  ⑥ GLOBAL CSS (PREMIUM DARK GLASSMORPHISM STYLE)
@@ -698,7 +732,7 @@ html, body, [class*="css"] {
     background: #34d399;
 }
 
-/* 스키밍 3열 그리드 */
+/* 스키밍 격자 카드 */
 .sg-card {
     border-radius: 20px;
     padding: 16px 8px 12px;
@@ -716,7 +750,7 @@ html, body, [class*="css"] {
 }
 .sg-card.pending {
     background: rgba(22, 30, 49, 0.5);
-    border: 1.5px solid rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.06);
 }
 .sg-card.know {
     background: rgba(52, 211, 153, 0.08);
@@ -872,7 +906,7 @@ html, body, [class*="css"] {
     font-weight: 800;
     text-decoration: none !important;
     background: rgba(255,255,255,0.02);
-    border: 1px solid rgba(255,255,255,0.04);
+    border: 1px solid rgba(255, 255, 255, 0.04);
     transition: all 0.2s;
 }
 .lib-tab.active {
@@ -948,7 +982,7 @@ DEFAULT_POS_STYLE = ("color:#8b949e;", "--glow:rgba(139,148,158,.15)", "linear-g
 def _pos_style(pos: str) -> tuple[str, str, str]:
     return POS_STYLE.get(pos, DEFAULT_POS_STYLE)
 
-def render_top_header(progress_pct: float) -> None:
+def render_top_header(progress_pct: float, day_number: int) -> None:
     wd = TODAY.weekday()
     days_since_sun = (wd + 1) % 7
     week_start = TODAY - timedelta(days=days_since_sun)
@@ -985,16 +1019,18 @@ def render_top_header(progress_pct: float) -> None:
     <div class="hdr-prog-wrap">
         <div class="hdr-prog-fill" style="width:{fill_pct:.1f}%"></div>
     </div>
-    <div class="day-lbl">Day {STUDY_DAY}</div>
+    <div class="day-lbl">Day {day_number} / 60</div>
 </div>
     """, unsafe_allow_html=True)
 
 def render_word_grid(words: list[dict]) -> str:
-    """오늘의 학습 후보 단어 9개를 3x3 격자 형태로 렌더링 (스펠링만 크게)"""
+    """오늘 학습 후보 단어 중 9개를 3x3 격자 형태로 예고 렌더링 (스펠링만 크게)"""
     shown = words[:9]
     html = '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px;">'
     for w in shown:
         en = w.get("english", "")
+        # '_' 이후의 숫자를 잘라내어 프리미엄 표시 (더미데이터용)
+        display_en = en.split("_")[0]
         html += f"""
         <div style="
             background: rgba(22, 30, 49, 0.75);
@@ -1008,7 +1044,7 @@ def render_word_grid(words: list[dict]) -> str:
             box-shadow: 0 4px 15px rgba(0,0,0,0.2);
             letter-spacing: -0.01em;
         ">
-            {en}
+            {display_en}
         </div>"""
     for _ in range(9 - len(shown)):
         html += '<div style="border: 1px dashed rgba(255, 255, 255, 0.04); border-radius: 16px; padding: 18px 8px;"></div>'
@@ -1020,7 +1056,7 @@ def render_word_strip(words: list[dict]) -> str:
     for i, w in enumerate(words[:7]):
         grad = STRIP_GRADS[i % len(STRIP_GRADS)]
         emoji = w.get("emoji", "📚")
-        en = w.get("english", "")
+        en = w.get("english", "").split("_")[0]
         html += (
             f'<div class="ws-item" style="background:linear-gradient(160deg,{grad});">'
             f'<span class="ws-emoji">{emoji}</span>'
@@ -1061,7 +1097,7 @@ def render_bottom_nav(active_tab: str) -> None:
             is_active = (active_tab == tab_id)
             if tab_id == "reset":
                 if st.button(label, key=f"nav_btn_{tab_id}", use_container_width=True):
-                    db_reset_today()
+                    db_reset_today(st.session_state.current_day)
                     reset_all_session()
                     st.session_state.page = "home"
                     st.session_state.active_tab = "home"
@@ -1074,16 +1110,19 @@ def render_bottom_nav(active_tab: str) -> None:
                     st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑧ PAGE: HOME
+#  ⑧ PAGE: HOME & DAY SELECTOR
 # ══════════════════════════════════════════════════════════════════
 def page_home() -> None:
     ss = st.session_state
     progress_pct = calc_progress_pct()
-    words = ss.all_words
+    
+    # ── 학습할 Day 선택 (60일치 셀렉트박스 연동) ────────────────
+    day_options = [f"Day {i}" for i in range(1, 61)]
+    
+    # 상단 대시보드 렌더링
+    render_top_header(progress_pct, ss.current_day)
 
-    render_top_header(progress_pct)
-
-    # 모두 마스터 축하 배너
+    # 마스터 축하 배너
     if ss.get("all_mastered", False):
         st.markdown("""
 <div style="background: linear-gradient(135deg, rgba(52, 211, 153, 0.15), rgba(96, 165, 250, 0.1));
@@ -1095,17 +1134,36 @@ def page_home() -> None:
             box-shadow: 0 8px 32px rgba(52, 211, 153, 0.15);">
     <div style="font-size: 2.8rem; margin-bottom: 8px;">🎉 🏆 🎉</div>
     <div style="color: #34d399; font-size: 1.25rem; font-weight: 900;">오늘 단어를 모두 마스터하셨습니다!</div>
-    <div style="color: #e6edf3; font-size: 0.85rem; margin-top: 6px;">이미 모든 단어를 완벽하게 알고 계시네요. 훌륭합니다! 🚀</div>
-</div>""", unsafe_allow_html=True)
+    <div style="color: #e6edf3; font-size: 0.85rem; margin-top: 6px;">Day {}의 모든 단어를 정복하셨습니다. 다음 날짜에 도전하세요! 🚀</div>
+</div>""".format(ss.current_day), unsafe_allow_html=True)
 
-    st.markdown('<div class="sec-lbl">📅 오늘의 학습 진행 현황</div>', unsafe_allow_html=True)
+    # 1. 학습할 Day 골라 세팅
+    st.markdown('<div class="sec-lbl">🎯 커리큘럼 선택</div>', unsafe_allow_html=True)
+    selected_day_str = st.selectbox(
+        "학습할 Day를 골라주세요",
+        options=day_options,
+        index=ss.current_day - 1,
+        key="day_selector"
+    )
+    selected_day = int(selected_day_str.split(" ")[-1])
+    
+    # Day 변경 시 안정적인 세션 리셋
+    if selected_day != ss.current_day:
+        ss.current_day = selected_day
+        reset_all_session()
+        st.rerun()
+
+    # 단어 로드
+    words = ss.all_words
+    total_day_words = len(words)  # 50개
+
+    st.markdown('<div class="sec-lbl">📅 오늘의 학습 진행 현황 (총 {}단어)</div>'.format(total_day_words), unsafe_allow_html=True)
 
     # 1. 스키밍 단계 카드
     skim_done = ss.skimming_done
     skim_status = '<span class="pc-status done">완료 ✅</span>' if skim_done else '<span class="pc-status">대기 중</span>'
     prog_fill = "100%" if skim_done else "0%"
     
-    # 미분류 시에는 3x3 격자를, 완료 후에는 미니 스트립을 렌더링
     grid_or_strip = render_word_grid(words) if not skim_done else render_word_strip(words)
     
     st.markdown(f"""
@@ -1117,18 +1175,17 @@ def page_home() -> None:
             <span class="pc-filter">≡</span>
         </div>
         <div class="pc-prog"><div class="pc-prog-fill" style="width:{prog_fill}"></div></div>
-        <div class="pc-meta">{skim_status}<span class="pc-time">~3분</span></div>
-        <div class="pc-desc">오늘의 단어 9개를 보며 아는 단어와 모르는 단어를 분류합니다.</div>
+        <div class="pc-meta">{skim_status}<span class="pc-time">~10분</span></div>
+        <div class="pc-desc">오늘의 50단어를 10개씩 분류하며 아는 단어와 모르는 단어를 걸러냅니다.</div>
     </div>
 </div>""", unsafe_allow_html=True)
 
     if not skim_done:
         if st.button("바로 시작", use_container_width=True, type="primary", key="go_skim"):
-            db_reset_today()
-            all_w = load_words()
-            # 하루 학습 단어 9개로 제한 설정
-            ss.all_words = all_w[:9] if len(all_w) >= 9 else all_w
+            db_reset_today(ss.current_day)
+            ss.all_words = load_words(ss.current_day)
             ss.skim_index = 0
+            ss.skim_page = 0
             ss.skim_states = {w["word_id"]: "pending" for w in ss.all_words}
             ss.unknown_ids = []
             ss.skimming_done = False
@@ -1157,7 +1214,7 @@ def page_home() -> None:
         </div>
         <div class="pc-prog"><div class="pc-prog-fill" style="width:{fc_prog}"></div></div>
         <div class="pc-meta">{fc_status}</div>
-        <div class="pc-desc">스키밍에서 선택된 모르는 단어들을 카드로 집중 암기합니다.</div>
+        <div class="pc-desc">걸러진 오답 및 모르는 단어를 카드로 확실히 집중 암기합니다.</div>
     </div>
 </div>""", unsafe_allow_html=True)
 
@@ -1165,7 +1222,7 @@ def page_home() -> None:
         if st.button("바로 시작", use_container_width=True, type="primary", key="go_fc"):
             ss.fc_index = 0
             ss.fc_show_meaning = False
-            ss.fc_cleared_ids = []
+            ss.fc_visited = set()
             ss.page = "flashcard"
             st.rerun()
     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
@@ -1190,7 +1247,7 @@ def page_home() -> None:
         </div>
         <div class="pc-prog"><div class="pc-prog-fill" style="width:{q_prog}"></div></div>
         <div class="pc-meta">{q_status}</div>
-        <div class="pc-desc">오늘 암기한 단어들의 성취도를 4지선다형 퀴즈로 검증합니다.</div>
+        <div class="pc-desc">암기한 단어들을 객관식 퀴즈를 통하여 최종 점검하고 맞춥니다.</div>
     </div>
 </div>""", unsafe_allow_html=True)
 
@@ -1206,15 +1263,23 @@ def page_home() -> None:
             ss.page = "quiz"
             st.rerun()
 
+    # ── 데이터 엑셀/CSV 업로드 가이드라인 확장성 추가 ────────────────
+    st.markdown("<hr>", unsafe_allow_html=True)
+    with st.expander("📂 대량 단어 엑셀/CSV 데이터 업로드"):
+        st.info(" Day 1~60번 대량 단어를 CSV 파일로 로드할 수 있는 기능 템플릿입니다.")
+        uploaded_file = st.file_uploader("단어 CSV 파일 선택 (.csv)", type=["csv"])
+        if uploaded_file is not None:
+            st.success("파일 업로드 완료! (추후 로컬 DB 대량 삽입 기능에 연결됨)")
+
     render_bottom_nav("home")
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑨ PAGE: SKIMMING (SINGLE CARD SEQUENTIAL CLASSIFIER)
+#  ⑨ PAGE: SKIMMING (10-WORDS PAGINATION OPTIMIZED FOR MOBILE)
 # ══════════════════════════════════════════════════════════════════
 def page_skimming() -> None:
     ss = st.session_state
     words = ss.all_words
-    total = len(words)
+    total = len(words)  # 50개
 
     if total == 0:
         ss.skimming_done = True
@@ -1222,16 +1287,13 @@ def page_skimming() -> None:
         st.rerun()
         return
 
-    idx = min(ss.skim_index, total - 1)
-    ss.skim_index = idx
-
-    current_word = words[idx]
-    wid = current_word["word_id"]
-
+    # 세션 상태 방어 코드
     if not ss.skim_states:
         ss.skim_states = {w["word_id"]: "pending" for w in words}
+    if "skim_page" not in ss:
+        ss.skim_page = 0
 
-    state = ss.skim_states.get(wid, "pending")
+    states = ss.skim_states
 
     # 뒤로가기 및 타이틀
     c_back, c_title = st.columns([2, 7])
@@ -1240,87 +1302,120 @@ def page_skimming() -> None:
             ss.page = "home"
             st.rerun()
     with c_title:
-        st.markdown('<div style="color:#ffffff;font-weight:800;font-size:1.05rem;padding-top:4px;">🔍 스키밍 — 한 단어씩 분류</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="color:#ffffff;font-weight:800;font-size:1.05rem;padding-top:4px;">🔍 스키밍 — Day {ss.current_day}</div>', unsafe_allow_html=True)
 
-    # 상태 및 진행도 체크
-    know_n = sum(1 for v in ss.skim_states.values() if v == "know")
-    unknown_n = sum(1 for v in ss.skim_states.values() if v == "unknown")
-    classified_n = know_n + unknown_n
+    # 10개 슬라이싱 계산
+    ITEMS_PER_PAGE = 10
+    start_idx = ss.skim_page * ITEMS_PER_PAGE
+    end_idx = min(start_idx + ITEMS_PER_PAGE, total)
+    page_words = words[start_idx:end_idx]
 
-    st.progress(classified_n / total if total else 0.0)
-    st.markdown(f'<div style="color:#8b949e;font-size:0.75rem;margin:4px 0 14px">{idx + 1} / {total}번째 단어 분류 중 · 알아요 {know_n} | 몰라요 {unknown_n}</div>', unsafe_allow_html=True)
+    # 집계 통계
+    know_n = sum(1 for v in states.values() if v == "know")
+    unknown_n = sum(1 for v in states.values() if v == "unknown")
+    pending_n = sum(1 for v in states.values() if v == "pending")
 
-    # 선택된 상태에 따른 동적 배경색 설정
-    bg_style = "background: rgba(22, 30, 49, 0.8);"
-    border_style = "border: 1px solid rgba(255, 255, 255, 0.08);"
-    if state == "know":
-        bg_style = "background: rgba(52, 211, 153, 0.08);"
-        border_style = "border: 1.5px solid rgba(52, 211, 153, 0.45);"
-    elif state == "unknown":
-        bg_style = "background: rgba(248, 81, 73, 0.08);"
-        border_style = "border: 1.5px solid rgba(248, 81, 73, 0.45);"
-
-    pos = current_word.get("part_of_speech", "명사")
-    emoji = current_word.get("emoji", "📚")
-
-    # 단어 스펠링만 크게 보이는 카드
     st.markdown(f"""
-<div class="fc-card" style="{bg_style} {border_style}">
-    <div class="fc-img" style="background: rgba(255,255,255,0.01); height: 160px;">
-        <span style="font-size: 5rem;">{emoji}</span>
+<div class="skim-summary">
+    <div class="ss-chip know">
+        <div class="ss-num">{know_n}</div>
+        <div class="ss-lbl">✓ 알아요</div>
     </div>
-    <div class="fc-body" style="text-align: center; padding: 30px 20px;">
-        <div style="font-size: 2.6rem; font-weight: 900; color: #ffffff; letter-spacing: -0.02em; margin-bottom: 8px;">{current_word['english']}</div>
-        <div style="font-size: 0.8rem; font-weight: 700; color: #8b949e; text-transform: uppercase; letter-spacing: 0.12em;">{pos}</div>
+    <div class="ss-chip unk">
+        <div class="ss-num">{unknown_n}</div>
+        <div class="ss-lbl">✗ 몰라요</div>
+    </div>
+    <div class="ss-chip pend">
+        <div class="ss-num">{pending_n}</div>
+        <div class="ss-lbl">미분류</div>
     </div>
 </div>""", unsafe_allow_html=True)
 
-    # 상태 분류 버튼
-    b1, b2 = st.columns(2)
-    with b1:
-        btn_type_k = "primary" if state == "know" else "secondary"
-        if st.button("알아요 👍", key=f"skim_k_{wid}", use_container_width=True, type=btn_type_k):
-            ss.skim_states[wid] = "know"
-            if idx < total - 1:
-                ss.skim_index = idx + 1
-            st.rerun()
-    with b2:
-        btn_type_u = "primary" if state == "unknown" else "secondary"
-        if st.button("몰라요 👎", key=f"skim_u_{wid}", use_container_width=True, type=btn_type_u):
-            ss.skim_states[wid] = "unknown"
-            if idx < total - 1:
-                ss.skim_index = idx + 1
-            st.rerun()
+    classified_n = know_n + unknown_n
+    st.progress(classified_n / total if total else 0.0)
+    st.markdown(f'<div style="color:#8b949e;font-size:0.75rem;margin:4px 0 14px">{ss.skim_page + 1} / 5 페이지 ({start_idx+1}~{end_idx}번째 단어) · 전체 {classified_n}/{total} 분류 완료</div>', unsafe_allow_html=True)
 
-    # 수동 이전 / 다음
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-    nav1, nav2 = st.columns(2)
-    with nav1:
-        if st.button("← 이전 단어", key="skim_prev", use_container_width=True, disabled=(idx == 0)):
-            ss.skim_index = idx - 1
-            st.rerun()
-    with nav2:
-        if st.button("다음 단어 →", key="skim_next", use_container_width=True, disabled=(idx == total - 1)):
-            ss.skim_index = idx + 1
-            st.rerun()
+    # 모바일용 가로 2열 배치 그리드
+    COLS_PER_ROW = 2
+    for r_idx in range(0, len(page_words), COLS_PER_ROW):
+        grid_cols = st.columns(COLS_PER_ROW, gap="small")
+        for c_idx in range(COLS_PER_ROW):
+            w_idx = r_idx + c_idx
+            if w_idx >= len(page_words):
+                break
+            word = page_words[w_idx]
+            wid = word["word_id"]
+            state = states.get(wid, "pending")
+            emoji = word.get("emoji", "📚")
+            # '_' 이후의 숫자 제거 및 노출
+            english_display = word["english"].split("_")[0]
+            state_icon = {"know": "✅", "unknown": "📌", "pending": ""}.get(state, "")
+
+            # 분류 상태별 동적 배경/테두리
+            bg_style = "background: rgba(22, 30, 49, 0.5);"
+            border_style = "border: 1px solid rgba(255, 255, 255, 0.06);"
+            if state == "know":
+                bg_style = "background: rgba(52, 211, 153, 0.06);"
+                border_style = "border: 1.5px solid rgba(52, 211, 153, 0.4);"
+            elif state == "unknown":
+                bg_style = "background: rgba(59, 130, 246, 0.08);"
+                border_style = "border: 1.5px solid rgba(59, 130, 246, 0.45);"
+
+            with grid_cols[c_idx]:
+                st.markdown(f"""
+<div class="sg-card {state}" style="{bg_style} {border_style} min-height: 100px; padding: 12px 6px;">
+    <span class="sg-state-icon">{state_icon}</span>
+    <span class="sg-emoji" style="font-size:1.6rem;">{emoji}</span>
+    <span class="sg-word" style="font-size:1.05rem; font-weight:800;">{english_display}</span>
+</div>""", unsafe_allow_html=True)
+
+                b1, b2 = st.columns(2, gap="small")
+                with b1:
+                    btn_k_cls = "btn-know-active" if state == "know" else ""
+                    st.markdown(f'<div class="{btn_k_cls}">', unsafe_allow_html=True)
+                    if st.button("알아요", key=f"skim_k_{wid}", use_container_width=True):
+                        states[wid] = "pending" if state == "know" else "know"
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                with b2:
+                    btn_u_cls = "btn-unk-active" if state == "unknown" else ""
+                    st.markdown(f'<div class="{btn_u_cls}">', unsafe_allow_html=True)
+                    if st.button("몰라요", key=f"skim_u_{wid}", use_container_width=True):
+                        states[wid] = "pending" if state == "unknown" else "unknown"
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    # 완료 제출
-    all_classified = all(v != "pending" for v in ss.skim_states.values())
-    if not all_classified:
-        st.markdown(f'<div style="color:#8b949e;font-size:0.8rem;text-align:center;margin-bottom:10px">⚠️ 모든 단어({total}개)를 분류해야 선택 완료할 수 있습니다.</div>', unsafe_allow_html=True)
+    # 10개 단위 페이지네이션 제어
+    p1, p2 = st.columns(2)
+    with p1:
+        if st.button("← 이전 10개", key="prev_page", use_container_width=True, disabled=(ss.skim_page == 0)):
+            ss.skim_page -= 1
+            st.rerun()
+    with p2:
+        if st.button("다음 10개 →", key="next_page", use_container_width=True, disabled=(ss.skim_page == 4 or end_idx >= total)):
+            ss.skim_page += 1
+            st.rerun()
 
-    if st.button("선택 완료 및 학습 시작 🚀", use_container_width=True, type="primary", disabled=not all_classified):
+    # 스키밍 최종 완료
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    all_classified = all(v != "pending" for v in states.values())
+    
+    if not all_classified:
+        st.markdown(f'<div style="color:#8b949e;font-size:0.8rem;text-align:center;margin-bottom:10px">⚠️ 50개 단어를 모두 분류해야 완료할 수 있습니다. (남은 미분류: {pending_n}개)</div>', unsafe_allow_html=True)
+
+    if st.button(f"선택 완료 및 학습 시작 🚀 (몰라요 {unknown_n}개)", use_container_width=True, type="primary", disabled=not all_classified):
         for w in words:
-            res = ss.skim_states.get(w["word_id"], "know")
+            res = states.get(w["word_id"], "know")
             db_set_skimming(w["word_id"], res)
 
-        ss.unknown_ids = [wid for wid, s in ss.skim_states.items() if s == "unknown"]
-        ss.all_words = load_words()
+        ss.unknown_ids = [wid for wid, s in states.items() if s == "unknown"]
+        ss.all_words = load_words(ss.current_day)
         ss.skimming_done = True
         
-        # 만약 모두 알아요로 클릭했을 때 처리
         if not ss.unknown_ids:
             ss.flashcard_done = True
             ss.quiz_done = True
@@ -1328,7 +1423,7 @@ def page_skimming() -> None:
             ss.page = "home"
         else:
             ss.all_mastered = False
-            # 플래시카드로 바로 진입!
+            # 플래시카드로 바로 진입
             ss.page = "flashcard"
             ss.fc_index = 0
             ss.fc_show_meaning = False
@@ -1338,7 +1433,7 @@ def page_skimming() -> None:
         st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑩ PAGE: FLASHCARD (MEMORIZER)
+#  ⑩ PAGE: FLASHCARD
 # ══════════════════════════════════════════════════════════════════
 def page_flashcard() -> None:
     ss = st.session_state
@@ -1352,7 +1447,6 @@ def page_flashcard() -> None:
         st.rerun()
         return
 
-    # 방문한 카드 인덱스 세트 트래킹 (실전 퀴즈 풀기 활성화용)
     if "fc_visited" not in ss:
         ss.fc_visited = set()
 
@@ -1384,8 +1478,12 @@ def page_flashcard() -> None:
     pos = word.get("part_of_speech", "명사")
     pos_css, glow_var, bg_grad = _pos_style(pos)
     emoji = word.get("emoji", "📚")
+    english_display = word['english'].split("_")[0]
+    korean_display = word['korean'].split("_")[0]
+    example_en_display = word['example_en']
+    example_ko_display = word['example_ko']
 
-    # 깔끔한 회색톤 이미지 플레이스홀더 영역 및 발음 레이아웃
+    # 플래시카드 렌더링
     st.markdown(f"""
 <div class="fc-card">
     <div class="fc-img" style="background: linear-gradient(160deg, #1f2937, #111827); border-bottom: 1px solid rgba(255,255,255,0.06);">
@@ -1395,25 +1493,23 @@ def page_flashcard() -> None:
     </div>
     <div class="fc-body">
         <div class="fc-word-row">
-            <span class="fc-en">{word['english']}</span>
+            <span class="fc-en">{english_display}</span>
             <span class="fc-sound">🔊 발음 듣기</span>
         </div>
         <div class="fc-pos" style="{pos_css}">{pos}</div>""", unsafe_allow_html=True)
 
-    # 뜻 / 예문 토글 영역
     if ss.fc_show_meaning:
         st.markdown(f"""
         <div class="fc-meaning">
-            <div class="fc-ko">{word['korean']}</div>
+            <div class="fc-ko">{korean_display}</div>
             <div class="fc-example">
-                {word['example_en']}
-                <span class="fc-ex-ko">{word['example_ko']}</span>
+                {example_en_display}
+                <span class="fc-ex-ko">{example_ko_display}</span>
             </div>
         </div>""", unsafe_allow_html=True)
 
     st.markdown("</div></div>", unsafe_allow_html=True)
 
-    # 뜻 보기 / 숨기기 토글 버튼
     if not ss.fc_show_meaning:
         if st.button("👁  뜻 보기", use_container_width=True, key="fc_show"):
             ss.fc_show_meaning = True
@@ -1425,7 +1521,6 @@ def page_flashcard() -> None:
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    # 이전 단어 / 다음 단어 네비게이션 버튼
     nav1, nav2 = st.columns(2)
     with nav1:
         if st.button("← 이전 단어", use_container_width=True, key="fc_prev", disabled=(idx == 0)):
@@ -1438,17 +1533,16 @@ def page_flashcard() -> None:
             ss.fc_show_meaning = False
             st.rerun()
 
-    # 점(Dot) 인디케이터
     dots_html = '<div class="fc-dots">'
-    for i in range(total):
+    # 50개 단어로 늘어난 경우 돗 개수 최대 10개만 간접 표시
+    shown_dots = min(total, 10)
+    for i in range(shown_dots):
         cls = "active" if i == idx else ("cleared" if i in ss.fc_visited else "")
         dots_html += f'<div class="fc-dot {cls}"></div>'
     dots_html += '</div>'
     st.markdown(dots_html, unsafe_allow_html=True)
 
-    # 모든 단어(마지막 단어까지 포함) 방문 완료 체크
     all_visited = (len(ss.fc_visited) >= total)
-
     st.markdown("<hr>", unsafe_allow_html=True)
 
     if all_visited:
@@ -1457,7 +1551,6 @@ def page_flashcard() -> None:
     <span style="color:#60a5fa; font-size:0.85rem; font-weight:700;">🎉 오늘 배울 모든 단어를 한 번씩 확인했습니다!</span>
 </div>""", unsafe_allow_html=True)
 
-    # 실전 퀴즈 풀기 버튼 활성화
     if st.button("📝 실전 퀴즈 풀기", use_container_width=True, type="primary", disabled=not all_visited):
         ss.flashcard_done = True
         
@@ -1474,13 +1567,19 @@ def page_flashcard() -> None:
         st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑪ PAGE: QUIZ (TESTER)
+#  ⑪ PAGE: QUIZ
 # ══════════════════════════════════════════════════════════════════
 NUMS = ["①", "②", "③", "④"]
 
 def _build_choices(word: dict, all_words: list[dict]) -> tuple[list[str], str]:
-    answer = word["korean"]
-    pool = [w["korean"] for w in all_words if w["word_id"] != word["word_id"] and w["korean"] != answer]
+    answer = word["korean"].split("_")[0]
+    # 오답 풀을 구성 (Day 전체 단어에서 다른 단어 뜻 3개 추출)
+    pool = list(set([w["korean"].split("_")[0] for w in all_words if w["word_id"] != word["word_id"] and w["korean"].split("_")[0] != answer]))
+    
+    # 만약 풀이 부족할 경우 대비
+    if len(pool) < 3:
+         pool = pool + ["선물", "진동", "의무", "환경"]
+         
     distractors = random.sample(pool, min(3, len(pool)))
     choices = distractors + [answer]
     random.shuffle(choices)
@@ -1534,12 +1633,14 @@ def page_quiz() -> None:
                     w = word_map.get(wid)
                     if w:
                         pos_css, _, _ = _pos_style(w["part_of_speech"])
+                        english_clean = w['english'].split("_")[0]
+                        korean_clean = w['korean'].split("_")[0]
                         st.markdown(f"""
 <div class="wn-card">
     <span class="wn-emoji">{w['emoji']}</span>
     <div class="wn-info">
-        <span class="wn-en">{w['english']}</span>
-        <span class="wn-ko">{w['korean']}</span>
+        <span class="wn-en">{english_clean}</span>
+        <span class="wn-ko">{korean_clean}</span>
         <div class="wn-pos" style="{pos_css}">{w['part_of_speech']}</div>
     </div>
     <span class="wn-wrong-badge">오답</span>
@@ -1567,6 +1668,7 @@ def page_quiz() -> None:
     pos_css, glow_var, bg_grad = _pos_style(word["part_of_speech"])
     emoji = word.get("emoji", "📚")
     glow_color = glow_var.split(":", 1)[-1]
+    english_clean = word['english'].split("_")[0]
 
     st.markdown(f"""
 <div class="fc-card" style="margin-bottom:14px">
@@ -1576,7 +1678,7 @@ def page_quiz() -> None:
     </div>
     <div class="fc-body" style="padding:18px 24px;">
         <div class="sec-lbl">Q{done_n + 1}. 다음 영단어의 알맞은 한글 뜻은?</div>
-        <div class="fc-en" style="margin-bottom:2px">{word['english']}</div>
+        <div class="fc-en" style="margin-bottom:2px">{english_clean}</div>
         <div class="fc-pos" style="{pos_css}">{word['part_of_speech']}</div>
     </div>
 </div>""", unsafe_allow_html=True)
@@ -1623,12 +1725,12 @@ def page_quiz() -> None:
             st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑫ PAGE: LIBRARY
+#  ⑫ PAGE: LIBRARY (오답 노트 & 마스터)
 # ══════════════════════════════════════════════════════════════════
 def page_library() -> None:
     ss = st.session_state
     progress_pct = calc_progress_pct()
-    render_top_header(progress_pct)
+    render_top_header(progress_pct, ss.current_day)
 
     lib_tab = st.query_params.get("lib", "wrong")
     if isinstance(lib_tab, list):
@@ -1653,7 +1755,6 @@ def page_library() -> None:
         if total_wrong == 0:
             st.markdown('<div class="wn-empty"><div class="wn-empty-icon">🎉</div><div style="font-weight:800;color:#ffffff;margin-bottom:6px">기록된 오답이 없습니다.</div><div>퀴즈의 오답이 여기에 자동으로 쌓입니다!</div></div>', unsafe_allow_html=True)
         else:
-            # 🔄 오답 단어만 재도전하기 버튼
             if st.button("🔄  오답 단어만 재도전하기", use_container_width=True, type="primary"):
                 ss.unknown_ids = [w["word_id"] for w in wrong_words]
                 ss.fc_index = 0
@@ -1672,13 +1773,15 @@ def page_library() -> None:
                 bar_pct = int(cnt / max_w * 100)
                 pos_css, _, _ = _pos_style(w["part_of_speech"])
                 is_retry = (w["study_status"] == "needs_retry")
+                english_clean = w['english'].split("_")[0]
+                korean_clean = w['korean'].split("_")[0]
 
                 st.markdown(f"""
 <div class="wn-card" style="margin-bottom:6px;">
     <span class="wn-emoji">{w['emoji']}</span>
     <div class="wn-info">
-        <span class="wn-en">{w['english']}</span>
-        <span class="wn-ko">{w['korean']}</span>
+        <span class="wn-en">{english_clean}</span>
+        <span class="wn-ko">{korean_clean}</span>
         <div class="wn-pos" style="{pos_css}">{w['part_of_speech']}</div>
         <div style="margin-top:8px;height:4px;background:rgba(255,255,255,0.06);border-radius:10px;overflow:hidden">
             <div style="width:{bar_pct}%;height:100%;background:linear-gradient(90deg, #f85149, #ff7b72);border-radius:10px;"></div>
@@ -1690,15 +1793,15 @@ def page_library() -> None:
     </div>
 </div>""", unsafe_allow_html=True)
 
-                # 개별 오답 마스터 버튼
                 if st.button("다시 외웠어요 완료 ✅", key=f"master_{wid}", use_container_width=True):
                     db_reset_wrong_count(wid)
-                    ss.all_words = load_words()
+                    ss.all_words = load_words(ss.current_day)
                     st.rerun()
                 st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
     else:
-        all_words_list = load_words()
-        st.markdown(f'<div style="color:#ffffff;font-weight:900;margin:16px 0 10px;font-size:1.1rem">전체 단어 목록 ({len(all_words_list)}개)</div>', unsafe_allow_html=True)
+        # 현재 선택된 Day의 전체 단어 리스트 노출
+        all_words_list = load_words(ss.current_day)
+        st.markdown(f'<div style="color:#ffffff;font-weight:900;margin:16px 0 10px;font-size:1.1rem">Day {ss.current_day} 단어 목록 ({len(all_words_list)}개)</div>', unsafe_allow_html=True)
         for w in all_words_list:
             status_icon = {
                 "completed":   "✅",
@@ -1708,13 +1811,15 @@ def page_library() -> None:
                 "reviewing":   "📕",
             }.get(w.get("study_status", ""), "○")
             pos_css, _, _ = _pos_style(w["part_of_speech"])
+            english_clean = w['english'].split("_")[0]
+            korean_clean = w['korean'].split("_")[0]
 
             st.markdown(f"""
 <div class="wn-card">
     <span class="wn-emoji">{w['emoji']}</span>
     <div class="wn-info">
-        <span class="wn-en">{w['english']}</span>
-        <span class="wn-ko">{w['korean']}</span>
+        <span class="wn-en">{english_clean}</span>
+        <span class="wn-ko">{korean_clean}</span>
         <div class="wn-pos" style="{pos_css}">{w['part_of_speech']}</div>
     </div>
     <span style="font-size:1.25rem;">{status_icon}</span>
@@ -1726,12 +1831,13 @@ def page_library() -> None:
 #  ⑬ PAGE: STATS
 # ══════════════════════════════════════════════════════════════════
 def page_stats() -> None:
+    ss = st.session_state
     progress_pct = calc_progress_pct()
-    render_top_header(progress_pct)
+    render_top_header(progress_pct, ss.current_day)
 
     stats = get_stats_data()
 
-    st.markdown('<div class="stats-header-title">📊 전체 학습 통계</div>', unsafe_allow_html=True)
+    st.markdown('<div class="stats-header-title">📊 전체 학습 통계 (60일 커리큘럼)</div>', unsafe_allow_html=True)
     st.markdown(f"""
 <div class="stats-grid">
     <div class="stats-card-box">
@@ -1759,11 +1865,13 @@ def page_stats() -> None:
     else:
         items_html = ""
         for w in stats['top_wrong']:
+            english_clean = w['english'].split("_")[0]
+            korean_clean = w['korean'].split("_")[0]
             items_html += f"""
             <div class="top-wrong-item">
                 <div>
-                    <span class="twi-word">{w['english']}</span>
-                    <span class="twi-meaning">{w['korean']}</span>
+                    <span class="twi-word">{english_clean}</span>
+                    <span class="twi-meaning">{korean_clean}</span>
                 </div>
                 <span class="twi-count" style="background:rgba(248,81,73,0.1);color:#f85149;border:1px solid rgba(248,81,73,0.2);border-radius:6px;padding:2px 8px;font-size:0.75rem;font-weight:800;">✖ {w['wrong_count']}회</span>
             </div>"""
@@ -1772,7 +1880,7 @@ def page_stats() -> None:
     render_bottom_nav("stats")
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑭ MAIN ROUTER
+#  ⑭ MAIN ROUTER & STABILITY CHECK
 # ══════════════════════════════════════════════════════════════════
 def main() -> None:
     init_db()
@@ -1780,8 +1888,10 @@ def main() -> None:
     init_session()
 
     ss = st.session_state
+    
+    # 단어 목록 최초 로드 방어
     if not ss.all_words:
-        ss.all_words = load_words()
+        ss.all_words = load_words(ss.current_day)
 
     p = ss.page
     if p == "home":
