@@ -1,5 +1,5 @@
 """
-🚀 ANTIGRAVITY — 망각의 중력을 거스르는 수능 영단어 앱 (v4.0)
+🚀 ANTIGRAVITY — 망각의 중력을 거스르는 수능 영단어 앱 (v5.0)
 ===========================================================
 기술 스택 : Python 3.10+ · Streamlit · SQLite3 · Pandas
 실행 방법 : streamlit run app.py
@@ -38,7 +38,7 @@ STRIP_GRADS = [
 ]
 
 # ══════════════════════════════════════════════════════════════════
-#  ③ DATABASE LAYER & Spaced Repetition 스키마 개편
+#  ③ DATABASE LAYER & Spaced Repetition / Streak 스키마 연동
 # ══════════════════════════════════════════════════════════════════
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))
@@ -60,7 +60,7 @@ def init_db() -> None:
                 emoji          TEXT    DEFAULT '📚',
                 day_number     INTEGER DEFAULT 1
             );
-            CREATE TABLE IF NOT EXISTS user_progress (
+            CREATE TABLE IF NOT EXISTS word_progress (
                 progress_id       INTEGER  PRIMARY KEY AUTOINCREMENT,
                 word_id           INTEGER  NOT NULL UNIQUE REFERENCES vocabulary(word_id),
                 study_status      TEXT     NOT NULL DEFAULT 'unseen',
@@ -71,36 +71,44 @@ def init_db() -> None:
                 next_review_date  TEXT     DEFAULT '{today_str}',
                 last_studied_at   DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS user_progress (
+                progress_id       INTEGER  PRIMARY KEY AUTOINCREMENT,
+                streak_count      INTEGER  NOT NULL DEFAULT 0,
+                last_learned_date TEXT     NOT NULL DEFAULT '',
+                total_mastered    INTEGER  NOT NULL DEFAULT 0
+            );
         """)
         
-        # next_review_date 컬럼 추가 방어코드 (스키마 확장 대비)
+        # next_review_date 컬럼 추가 방어코드
         try:
-            conn.execute(f"ALTER TABLE user_progress ADD COLUMN next_review_date TEXT DEFAULT '{today_str}'")
+            conn.execute(f"ALTER TABLE word_progress ADD COLUMN next_review_date TEXT DEFAULT '{today_str}'")
         except sqlite3.OperationalError:
             pass # 이미 존재함
 
         # NULL 값 방어 초기화 (기존 데이터 보정)
-        conn.execute(f"UPDATE user_progress SET next_review_date = '{today_str}' WHERE next_review_date IS NULL")
+        conn.execute(f"UPDATE word_progress SET next_review_date = '{today_str}' WHERE next_review_date IS NULL")
+
+        # user_progress 테이블에 1행 기본 데이터 삽입 (0일, 없음, 0개)
+        count_user = conn.execute("SELECT COUNT(*) FROM user_progress").fetchone()[0]
+        if count_user == 0:
+            conn.execute("INSERT INTO user_progress (streak_count, last_learned_date, total_mastered) VALUES (0, '', 0)")
 
         # 3,000단어 고교 수능 어휘 자동 생성기 작동
         count = conn.execute("SELECT COUNT(*) FROM vocabulary").fetchone()[0]
         if count < 3000:
             initialize_massive_vocab(conn)
             
-        # user_progress 테이블 동기화
+        # word_progress 테이블 동기화
         conn.execute("""
-            INSERT OR IGNORE INTO user_progress (word_id)
+            INSERT OR IGNORE INTO word_progress (word_id)
             SELECT word_id FROM vocabulary
-            WHERE word_id NOT IN (SELECT word_id FROM user_progress)
+            WHERE word_id NOT IN (SELECT word_id FROM word_progress)
         """)
 
 # ══════════════════════════════════════════════════════════════════
 #  ④ 3,000단어 자동 생성기 (Linguistic-based Generator)
 # ══════════════════════════════════════════════════════════════════
 def initialize_massive_vocab(conn: sqlite3.Connection) -> None:
-    """외부 엑셀 파일 없이도 수능형 단어 3,000개를 중복 없이 생성하여 DB에 적재"""
-    
-    # 100개 고교 필수 어근
     roots = [
         ("accomplish", "성취하다", "동사"),
         ("fundamental", "근본적인", "형용사"),
@@ -201,9 +209,7 @@ def initialize_massive_vocab(conn: sqlite3.Connection) -> None:
         ("unique", "독특한", "형용사")
     ]
     
-    # 30종 접두사/접미사 파생 파라미터 (100 어근 * 30종 = 3000개 고유 조합)
     derivs = [
-        # (prefix, suffix, pos, meaning_suffix)
         ("", "", None, ""),
         ("un", "", "형용사", "하지 않은 / 원치 않는"),
         ("re", "", "동사", "다시 ~하다 / 재검토하다"),
@@ -241,26 +247,21 @@ def initialize_massive_vocab(conn: sqlite3.Connection) -> None:
     data_to_insert = []
     word_idx = 1
     
-    # 60일치 x 50개 = 3,000개
     for day in range(1, 61):
         for in_day in range(1, 51):
             root_en, root_ko, root_pos = roots[(word_idx - 1) % len(roots)]
             prefix, suffix, pos_override, m_suffix = derivs[(word_idx - 1) % len(derivs)]
             
-            # 파생 영어 단어 생성
             word = f"{prefix}{root_en}{suffix}"
             part_of_speech = pos_override if pos_override else root_pos
             
-            # 한글 뜻 조립
             meaning = f"{root_ko} {m_suffix}".strip()
             if not m_suffix:
                 meaning = root_ko
             
-            # 이중 중복 방지를 위한 안전 번호 부여
             word_unique = f"{word}_{word_idx}"
             meaning_unique = f"{meaning}_{word_idx}"
             
-            # 품사별 정교한 수능형 예문 템플릿 결합
             if part_of_speech == "동사":
                 example_en = f"The researcher decided to {word} the main parameters to get accurate results."
                 example_ko = f"연구원은 정확한 결과를 얻기 위해 주요 매개변수를 {meaning}(하기)로 결정했다."
@@ -270,7 +271,7 @@ def initialize_massive_vocab(conn: sqlite3.Connection) -> None:
             elif part_of_speech == "부사":
                 example_en = f"The variable was adjusted {word} to meet the strict criteria of the test."
                 example_ko = f"변수는 테스트의 엄격한 기준을 맞추기 위해 {meaning} 조절되었다."
-            else: # 명사
+            else:
                 example_en = f"We need to establish a stable {word} before initiating the secondary phase."
                 example_ko = f"우리는 2단계 작업을 시작하기 전에 안정적인 {meaning}을(를) 확립할 필요가 있다."
                 
@@ -287,7 +288,7 @@ def initialize_massive_vocab(conn: sqlite3.Connection) -> None:
     """, data_to_insert)
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑤ DATA ACCESS LAYER (쿼리 함수 개편)
+#  ⑤ DATA ACCESS LAYER (단어 진행 word_progress 조인으로 리팩토링)
 # ══════════════════════════════════════════════════════════════════
 def load_words(day_number: int) -> list[dict]:
     with get_conn() as conn:
@@ -295,33 +296,31 @@ def load_words(day_number: int) -> list[dict]:
             SELECT v.*, p.study_status, p.skimming_result,
                    p.flashcard_cleared, p.quiz_passed, p.wrong_count, p.next_review_date
             FROM   vocabulary v
-            JOIN   user_progress p ON v.word_id = p.word_id
+            JOIN   word_progress p ON v.word_id = p.word_id
             WHERE  v.day_number = ?
             ORDER  BY v.word_id
         """, (day_number,)).fetchall()
     return [dict(r) for r in rows]
 
 def load_review_words(today_date_str: str, current_day: int) -> list[dict]:
-    """과거 단어 중 복습 기한이 도래한 오답 단어들 반환 (현재 선택한 Day 제외, 중복 방지)"""
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT v.*, p.study_status, p.skimming_result,
                    p.flashcard_cleared, p.quiz_passed, p.wrong_count, p.next_review_date
             FROM   vocabulary v
-            JOIN   user_progress p ON v.word_id = p.word_id
+            JOIN   word_progress p ON v.word_id = p.word_id
             WHERE  p.next_review_date <= ? AND v.day_number != ? AND p.wrong_count > 0
             ORDER  BY v.word_id
         """, (today_date_str, current_day)).fetchall()
     return [dict(r) for r in rows]
 
 def load_all_review_words(today_date_str: str) -> list[dict]:
-    """Day 번호와 무관하게 DB 전체에서 복습 기한이 도래한 과거 오답 단어들 반환 (오답 복습용)"""
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT v.*, p.study_status, p.skimming_result,
                    p.flashcard_cleared, p.quiz_passed, p.wrong_count, p.next_review_date
             FROM   vocabulary v
-            JOIN   user_progress p ON v.word_id = p.word_id
+            JOIN   word_progress p ON v.word_id = p.word_id
             WHERE  p.next_review_date <= ? AND p.wrong_count > 0
             ORDER  BY v.word_id
         """, (today_date_str,)).fetchall()
@@ -340,7 +339,7 @@ def load_tomorrow_review_words() -> list[dict]:
             SELECT v.word_id, v.word, v.meaning, v.part_of_speech, v.emoji,
                    p.wrong_count, p.next_review_date
             FROM   vocabulary v
-            JOIN   user_progress p ON v.word_id = p.word_id
+            JOIN   word_progress p ON v.word_id = p.word_id
             WHERE  p.next_review_date = ? AND p.study_status != 'unseen'
             ORDER  BY v.word ASC
         """, (tomorrow_str,)).fetchall()
@@ -353,7 +352,7 @@ def calc_completed_days() -> int:
                    COUNT(v.word_id) as total,
                    SUM(CASE WHEN p.study_status='completed' THEN 1 ELSE 0 END) as completed
             FROM   vocabulary v
-            JOIN   user_progress p ON v.word_id = p.word_id
+            JOIN   word_progress p ON v.word_id = p.word_id
             GROUP  BY v.day_number
         """).fetchall()
     
@@ -375,12 +374,12 @@ def db_set_skimming(word_id: int, result: str) -> None:
     with get_conn() as conn:
         if result == "unknown":
             conn.execute(
-                "UPDATE user_progress SET skimming_result=?, study_status=?, next_review_date=?, wrong_count=wrong_count+1 WHERE word_id=?",
+                "UPDATE word_progress SET skimming_result=?, study_status=?, next_review_date=?, wrong_count=wrong_count+1 WHERE word_id=?",
                 (result, status, next_date_str, word_id),
             )
         else:
             conn.execute(
-                "UPDATE user_progress SET skimming_result=?, study_status=?, next_review_date=? WHERE word_id=?",
+                "UPDATE word_progress SET skimming_result=?, study_status=?, next_review_date=? WHERE word_id=?",
                 (result, status, next_date_str, word_id),
             )
 
@@ -391,7 +390,7 @@ def db_set_flashcard(word_id: int, cleared: bool) -> None:
     next_date_str = str(next_date)
     with get_conn() as conn:
         conn.execute(
-            "UPDATE user_progress SET flashcard_cleared=?, study_status=?, next_review_date=? WHERE word_id=?",
+            "UPDATE word_progress SET flashcard_cleared=?, study_status=?, next_review_date=? WHERE word_id=?",
             (1 if cleared else 0, status, next_date_str, word_id),
         )
 
@@ -402,12 +401,12 @@ def db_set_quiz(word_id: int, passed: bool) -> None:
     with get_conn() as conn:
         if passed:
             conn.execute(
-                "UPDATE user_progress SET quiz_passed=1, study_status='completed', next_review_date=? WHERE word_id=?",
+                "UPDATE word_progress SET quiz_passed=1, study_status='completed', next_review_date=? WHERE word_id=?",
                 (next_date_str, word_id),
             )
         else:
             conn.execute(
-                "UPDATE user_progress SET wrong_count=wrong_count+1, study_status='needs_retry', next_review_date=? WHERE word_id=?",
+                "UPDATE word_progress SET wrong_count=wrong_count+1, study_status='needs_retry', next_review_date=? WHERE word_id=?",
                 (next_date_str, word_id),
             )
 
@@ -418,7 +417,7 @@ def load_wrong_words() -> list[dict]:
                    v.example_en, v.example_ko, v.emoji,
                    p.wrong_count, p.study_status, p.next_review_date
             FROM   vocabulary v
-            JOIN   user_progress p ON v.word_id = p.word_id
+            JOIN   word_progress p ON v.word_id = p.word_id
             WHERE  p.wrong_count > 0
             ORDER  BY p.wrong_count DESC, v.word ASC
         """).fetchall()
@@ -426,16 +425,16 @@ def load_wrong_words() -> list[dict]:
 
 def get_stats_data() -> dict:
     with get_conn() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM user_progress").fetchone()[0]
-        completed = conn.execute("SELECT COUNT(*) FROM user_progress WHERE study_status='completed'").fetchone()[0]
-        unseen = conn.execute("SELECT COUNT(*) FROM user_progress WHERE study_status='unseen'").fetchone()[0]
-        wrong_total = conn.execute("SELECT SUM(wrong_count) FROM user_progress").fetchone()[0] or 0
-        wrong_words_count = conn.execute("SELECT COUNT(*) FROM user_progress WHERE wrong_count > 0").fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM word_progress").fetchone()[0]
+        completed = conn.execute("SELECT COUNT(*) FROM word_progress WHERE study_status='completed'").fetchone()[0]
+        unseen = conn.execute("SELECT COUNT(*) FROM word_progress WHERE study_status='unseen'").fetchone()[0]
+        wrong_total = conn.execute("SELECT SUM(wrong_count) FROM word_progress").fetchone()[0] or 0
+        wrong_words_count = conn.execute("SELECT COUNT(*) FROM word_progress WHERE wrong_count > 0").fetchone()[0]
         
         top_wrong = conn.execute("""
             SELECT v.word, v.meaning, p.wrong_count 
             FROM   vocabulary v 
-            JOIN   user_progress p ON v.word_id = p.word_id 
+            JOIN   word_progress p ON v.word_id = p.word_id 
             WHERE  p.wrong_count > 0 
             ORDER  BY p.wrong_count DESC, v.word ASC 
             LIMIT  3
@@ -454,7 +453,7 @@ def db_reset_today(day_number: int) -> None:
     today_str = str(date.today())
     with get_conn() as conn:
         conn.execute("""
-            UPDATE user_progress
+            UPDATE word_progress
             SET study_status='unseen',skimming_result='pending',
                 flashcard_cleared=0,quiz_passed=0,wrong_count=0,
                 next_review_date=?
@@ -466,12 +465,87 @@ def db_reset_wrong_count(word_id: int) -> None:
     next_date_str = str(next_date)
     with get_conn() as conn:
         conn.execute(
-            "UPDATE user_progress SET wrong_count=0, study_status='completed', next_review_date=? WHERE word_id=?",
+            "UPDATE word_progress SET wrong_count=0, study_status='completed', next_review_date=? WHERE word_id=?",
             (next_date_str, word_id),
         )
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑥ SESSION STATE SYSTEM & DEFENSIVE PROGRAMMING
+#  ⑥ GLOBAL USER PROFILE & STREAK 로직 구현
+# ══════════════════════════════════════════════════════════════════
+def get_user_progress_global() -> dict:
+    with get_conn() as conn:
+        row = conn.execute("SELECT streak_count, last_learned_date, total_mastered FROM user_progress LIMIT 1").fetchone()
+    if row:
+        return dict(row)
+    return {"streak_count": 0, "last_learned_date": "", "total_mastered": 0}
+
+def get_level_badge(total_mastered: int) -> str:
+    if total_mastered <= 300:
+        return "Lv.1 단어 새싹 🌱"
+    elif total_mastered <= 1000:
+        return "Lv.2 단어 탐험가 🧭"
+    elif total_mastered <= 2000:
+        return "Lv.3 단어 사냥꾼 🏹"
+    else:
+        return "Lv.4 수능 마스터 👑"
+
+def update_user_streak_and_mastered() -> tuple[bool, bool]:
+    """
+    오늘 분량 퀴즈 최종 완료 시 호출되는 스트릭/레벨 연산 로직.
+    리턴값: (streak_increased, level_up_occurred)
+    """
+    today_str = str(date.today())
+    yesterday_str = str(date.today() - timedelta(days=1))
+    
+    with get_conn() as conn:
+        user_info = conn.execute("SELECT streak_count, last_learned_date, total_mastered FROM user_progress LIMIT 1").fetchone()
+        if not user_info:
+            conn.execute("INSERT INTO user_progress (streak_count, last_learned_date, total_mastered) VALUES (0, '', 0)")
+            user_info = {"streak_count": 0, "last_learned_date": "", "total_mastered": 0}
+            
+        current_streak = user_info["streak_count"]
+        last_date = user_info["last_learned_date"]
+        current_mastered = user_info["total_mastered"]
+        
+        # 1. 스트릭 판별
+        streak_increased = False
+        new_streak = current_streak
+        
+        if last_date == yesterday_str:
+            new_streak += 1
+            streak_increased = True
+        elif last_date == today_str:
+            # 이미 오늘 공부해서 스트릭이 올랐으므로 유지
+            pass
+        else:
+            # 어제보다 과거이거나 공백이면 끊겼으므로 1일로 설정
+            new_streak = 1
+            streak_increased = True
+            
+        # 2. 누적 마스터 단어 수 카운트 (next_review_date가 오늘 + 10일 후 이상인 것)
+        target_date_str = str(date.today() + timedelta(days=10))
+        mastered_count = conn.execute(
+            "SELECT COUNT(*) FROM word_progress WHERE next_review_date >= ?", 
+            (target_date_str,)
+        ).fetchone()[0]
+        
+        # 레벨 배지 변동 판별
+        old_level = get_level_badge(current_mastered)
+        new_level = get_level_badge(mastered_count)
+        level_up_occurred = (old_level != new_level and mastered_count > current_mastered)
+        
+        # 전역 진행 테이블 갱신
+        conn.execute("""
+            UPDATE user_progress 
+            SET streak_count = ?, last_learned_date = ?, total_mastered = ?
+            WHERE progress_id = (SELECT progress_id FROM user_progress LIMIT 1)
+        """, (new_streak, today_str, mastered_count))
+        conn.commit()
+        
+    return streak_increased, level_up_occurred
+
+# ══════════════════════════════════════════════════════════════════
+#  ⑦ SESSION STATE SYSTEM & DEFENSIVE PROGRAMMING
 # ══════════════════════════════════════════════════════════════════
 def init_session() -> None:
     defaults = {
@@ -500,6 +574,9 @@ def init_session() -> None:
         "quiz_choices":   [],
         "quiz_answer":    "",
         "quiz_done":      False,
+        # streak
+        "streak_checked": False,
+        "show_balloons":  False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -509,7 +586,6 @@ def reset_all_session() -> None:
     ss = st.session_state
     day = ss.get("current_day", 1)
     
-    # 50개 단어 + 누적 복습 대상 오답 단어 로드
     day_words, review_words = load_today_words(day)
     ss.all_words = day_words + review_words
     ss.review_words_count = len(review_words)
@@ -522,12 +598,14 @@ def reset_all_session() -> None:
         "quiz_queue": [], "quiz_results": {}, "quiz_answered": False,
         "quiz_correct": False, "quiz_choices": [], "quiz_answer": "",
         "quiz_done": False,
+        "streak_checked": False,
+        "show_balloons": False,
     }
     for k, v in keys.items():
         ss[k] = v
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑦ GLOBAL CSS (PREMIUM DARK GLASSMORPHISM STYLE)
+#  ⑧ GLOBAL CSS (PREMIUM DARK GLASSMORPHISM STYLE)
 # ══════════════════════════════════════════════════════════════════
 def inject_css() -> None:
     st.markdown("""
@@ -1201,20 +1279,50 @@ hr { border-color: rgba(255,255,255,0.06) !important; margin: 16px 0 !important;
     """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑧ UI COMPONENTS (명칭 변경 대응)
+#  ⑨ UI COMPONENTS
 # ══════════════════════════════════════════════════════════════════
-POS_STYLE = {
-    "형용사": ("color:#60a5fa;", "--glow:rgba(96,165,250,.18)", "linear-gradient(160deg,#1a3a5c,#0d2035)"),
-    "동사":   ("color:#34d399;", "--glow:rgba(52,211,153,.18)", "linear-gradient(160deg,#1a2d1a,#0d200d)"),
-    "명사":   ("color:#bc8cff;", "--glow:rgba(188,140,255,.18)", "linear-gradient(160deg,#2d1a3a,#1a0d2e)"),
-    "부사":   ("color:#fbbf24;", "--glow:rgba(251,191,36,.18)", "linear-gradient(160deg,#2d2a1a,#201e0d)"),
-}
-DEFAULT_POS_STYLE = ("color:#8b949e;", "--glow:rgba(139,148,158,.15)", "linear-gradient(160deg,#1a1f27,#0d1117)")
-
-def _pos_style(pos: str) -> tuple[str, str, str]:
-    return POS_STYLE.get(pos, DEFAULT_POS_STYLE)
-
 def render_top_header(progress_pct: float, day_number: int) -> None:
+    user_info = get_user_progress_global()
+    streak = user_info["streak_count"]
+    mastered = user_info["total_mastered"]
+    level_name = get_level_badge(mastered)
+
+    # 1. 최상단 스트릭 & 레벨 배지 렌더링 (다크모드 카드 스타일)
+    c_st, c_lv = st.columns(2)
+    with c_st:
+        st.markdown(f"""
+        <div style="
+            background: rgba(248, 81, 73, 0.08);
+            border: 1px solid rgba(248, 81, 73, 0.25);
+            border-radius: 16px;
+            padding: 10px 14px;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(248, 81, 73, 0.12);
+        ">
+            <span style="color: #ff7b72; font-weight: 850; font-size: 0.9rem; letter-spacing: -0.01em;">
+                🔥 현재 {streak}일 연속 열공 중!
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+    with c_lv:
+        st.markdown(f"""
+        <div style="
+            background: rgba(96, 165, 250, 0.08);
+            border: 1px solid rgba(96, 165, 250, 0.25);
+            border-radius: 16px;
+            padding: 10px 14px;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(96, 165, 250, 0.12);
+        ">
+            <span style="color: #60a5fa; font-weight: 850; font-size: 0.9rem; letter-spacing: -0.01em;">
+                🏆 등급: {level_name}
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+    # 2. 기존 상단 캘린더 및 진행바 렌더링
     wd = TODAY.weekday()
     days_since_sun = (wd + 1) % 7
     week_start = TODAY - timedelta(days=days_since_sun)
@@ -1254,6 +1362,9 @@ def render_top_header(progress_pct: float, day_number: int) -> None:
     <div class="day-lbl">Day {day_number} / 60</div>
 </div>
     """, unsafe_allow_html=True)
+
+def _pos_style(pos: str) -> tuple[str, str, str]:
+    return POS_STYLE.get(pos, DEFAULT_POS_STYLE)
 
 def render_word_grid(words: list[dict]) -> str:
     shown = words[:9]
@@ -1340,13 +1451,12 @@ def render_bottom_nav(active_tab: str) -> None:
                     st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑨ PAGE: HOME & DAY SELECTOR
+#  ⑩ PAGE: HOME & DAY SELECTOR
 # ══════════════════════════════════════════════════════════════════
 def page_home() -> None:
     ss = st.session_state
     progress_pct = calc_progress_pct()
     
-    # 상단 대시보드 렌더링
     render_top_header(progress_pct, ss.current_day)
 
     # 🚨 실시간 외워야 할 오답 개수 및 복습 버튼 추가 ───────────────────
@@ -1372,19 +1482,18 @@ def page_home() -> None:
         if review_count == 0:
             st.success("지금은 복습할 오답 단어가 없습니다. 완벽해요! 🎉")
         else:
-            # 오답 복습 모드로 강제 세션 전환
             ss.all_words = all_review_words
             ss.unknown_ids = [w["word_id"] for w in all_review_words]
-            ss.skimming_done = True # 스키밍 분류 스킵
+            ss.skimming_done = True
             ss.fc_index = 0
             ss.fc_visited = set()
             ss.flashcard_done = False
-            ss.page = "flashcard" # 2단계 플래시카드로 이동
+            ss.page = "flashcard"
             st.rerun()
             
     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
-    # 🔄 스마트 복습 주기 알림 배너 노출 ───────────────────
+    # 🔄 스마트 복습 주기 알림 배너 노출
     review_cnt = ss.get("review_words_count", 0)
     if review_cnt > 0:
         st.markdown(f"""
@@ -1403,7 +1512,6 @@ def page_home() -> None:
     </div>
 </div>""", unsafe_allow_html=True)
 
-    # 마스터 축하 배너
     if ss.get("all_mastered", False):
         st.markdown("""
 <div style="background: linear-gradient(135deg, rgba(52, 211, 153, 0.15), rgba(96, 165, 250, 0.1));
@@ -1418,7 +1526,6 @@ def page_home() -> None:
     <div style="color: #e6edf3; font-size: 0.85rem; margin-top: 6px;">Day {}의 모든 단어를 정복하셨습니다. 다음 날짜에 도전하세요! 🚀</div>
 </div>""".format(ss.current_day), unsafe_allow_html=True)
 
-    # 학습할 Day 선택
     st.markdown('<div class="sec-lbl">🎯 커리큘럼 선택</div>', unsafe_allow_html=True)
     day_options = [f"Day {i}" for i in range(1, 61)]
     selected_day_str = st.selectbox(
@@ -1540,7 +1647,7 @@ def page_home() -> None:
     render_bottom_nav("home")
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑩ PAGE: SKIMMING (10-WORDS PAGINATION)
+#  ⑪ PAGE: SKIMMING (10-WORDS PAGINATION)
 # ══════════════════════════════════════════════════════════════════
 def page_skimming() -> None:
     ss = st.session_state
@@ -1671,7 +1778,6 @@ def page_skimming() -> None:
             db_set_skimming(w["word_id"], res)
 
         ss.unknown_ids = [wid for wid, s in states.items() if s == "unknown"]
-        # 동적으로 리스트 새로고침
         day_words, review_words = load_today_words(ss.current_day)
         ss.all_words = day_words + review_words
         ss.skimming_done = True
@@ -1680,6 +1786,12 @@ def page_skimming() -> None:
             ss.flashcard_done = True
             ss.quiz_done = True
             ss.all_mastered = True
+            
+            if not ss.get("streak_checked", False):
+                streak_inc, lvl_up = update_user_streak_and_mastered()
+                ss.streak_checked = True
+                ss.show_balloons = (streak_inc or lvl_up)
+                
             ss.page = "home"
         else:
             ss.all_mastered = False
@@ -1692,7 +1804,7 @@ def page_skimming() -> None:
         st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑪ PAGE: FLASHCARD
+#  ⑫ PAGE: FLASHCARD
 # ══════════════════════════════════════════════════════════════════
 def page_flashcard() -> None:
     ss = st.session_state
@@ -1724,7 +1836,7 @@ def page_flashcard() -> None:
     h1, h2, h3 = st.columns([2, 4, 3])
     with h1:
         if st.button("← 홈", key="back_fc"):
-            reset_all_session() # 오답 학습 탈출 대비
+            reset_all_session()
             ss.page = "home"
             st.rerun()
     with h2:
@@ -1823,7 +1935,7 @@ def page_flashcard() -> None:
         st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑫ PAGE: QUIZ
+#  ⑬ PAGE: QUIZ
 # ══════════════════════════════════════════════════════════════════
 NUMS = ["①", "②", "③", "④"]
 
@@ -1852,23 +1964,36 @@ def page_quiz() -> None:
     total = len(ss.unknown_ids)
     done_n = len(ss.quiz_results)
 
-    h1, h2, h3 = st.columns([2, 4, 3])
-    with h1:
-        if st.button("← 홈", key="back_quiz"):
-            reset_all_session()
-            ss.page = "home"
-            st.rerun()
-    with h2:
-        st.markdown('<div style="color:#ffffff;font-weight:800;font-size:1.05rem;padding-top:4px;">📝 퀴즈 검증</div>', unsafe_allow_html=True)
-    with h3:
-        st.markdown(f'<div style="text-align:right"><span class="badge">{done_n}/{total}</span></div>', unsafe_allow_html=True)
-
+    # 1. 퀴즈를 모두 완료(제출)하는 성공 화면 진입
     if not queue:
         ss.quiz_done = True
         correct_n = sum(1 for v in ss.quiz_results.values() if v)
         wrong_n = total - correct_n
         score_pct = int(correct_n / total * 100) if total else 0
         trophy = "🏆" if score_pct == 100 else ("🌟" if score_pct >= 80 else "📚")
+
+        # 🔄 실시간 스트릭/누적 마스터 계산 (세션 상태 플래그로 1회만 동작 유도)
+        if not ss.get("streak_checked", False):
+            streak_inc, lvl_up = update_user_streak_and_mastered()
+            ss.streak_checked = True
+            ss.show_balloons = (streak_inc or lvl_up)
+
+        # 화려하게 축하 메시지 및 st.balloons 효과 터뜨림
+        if ss.get("show_balloons", False):
+            st.balloons()
+            st.toast("🎉 대박! 연속 학습 스트릭이 갱신되었거나 등급이 상승했습니다! 🌟")
+            ss.show_balloons = False # 일회성 소거
+
+        h1, h2, h3 = st.columns([2, 4, 3])
+        with h1:
+            if st.button("← 홈", key="back_quiz_done"):
+                reset_all_session()
+                ss.page = "home"
+                st.rerun()
+        with h2:
+            st.markdown('<div style="color:#ffffff;font-weight:800;font-size:1.05rem;padding-top:4px;">📝 퀴즈 검증</div>', unsafe_allow_html=True)
+        with h3:
+            st.markdown(f'<div style="text-align:right"><span class="badge">{done_n}/{total}</span></div>', unsafe_allow_html=True)
 
         st.markdown(f"""
 <div class="result-hero" style="text-align:center;padding:24px;background:rgba(22, 30, 49, 0.65);border-radius:24px;border:1px solid rgba(255,255,255,0.08);">
@@ -1913,6 +2038,18 @@ def page_quiz() -> None:
             ss.page = "home"
             st.rerun()
         return
+
+    # 2. 퀴즈가 진행 중인 일반 화면
+    h1, h2, h3 = st.columns([2, 4, 3])
+    with h1:
+        if st.button("← 홈", key="back_quiz"):
+            reset_all_session()
+            ss.page = "home"
+            st.rerun()
+    with h2:
+        st.markdown('<div style="color:#ffffff;font-weight:800;font-size:1.05rem;padding-top:4px;">📝 퀴즈 검증</div>', unsafe_allow_html=True)
+    with h3:
+        st.markdown(f'<div style="text-align:right"><span class="badge">{done_n}/{total}</span></div>', unsafe_allow_html=True)
 
     st.progress(done_n / total if total else 0.0)
     st.markdown(f'<div style="color:#8b949e;font-size:0.75rem;margin:4px 0 14px">{done_n + 1} / {total}번째 문제</div>', unsafe_allow_html=True)
@@ -1987,7 +2124,7 @@ def page_quiz() -> None:
             st.rerun()
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑬ PAGE: LIBRARY (오답 노트 & 내일 복습 예고 & 파일 업로더 추가)
+#  ⑭ PAGE: LIBRARY (오답 노트 & 내일 복습 예고 & 파일 업로더)
 # ══════════════════════════════════════════════════════════════════
 def page_library() -> None:
     ss = st.session_state
@@ -2065,6 +2202,8 @@ def page_library() -> None:
                     day_words, review_words = load_today_words(ss.current_day)
                     ss.all_words = day_words + review_words
                     ss.review_words_count = len(review_words)
+                    
+                    update_user_streak_and_mastered()
                     st.rerun()
                 st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
         
@@ -2130,19 +2269,16 @@ def page_library() -> None:
             try:
                 df = pd.read_csv(uploaded_file, encoding='utf-8')
                 
-                # 필수 컬럼 체크
                 required_cols = ['word', 'meaning', 'part_of_speech']
                 missing_cols = [col for col in required_cols if col not in df.columns]
                 
                 if missing_cols:
                     st.error(f"❌ 필수 컬럼이 누락되었습니다: {', '.join(missing_cols)}")
                 else:
-                    # Pandas 레벨 중복 제거
                     before_len = len(df)
                     df = df.drop_duplicates(subset=['word'])
                     after_len = len(df)
                     
-                    # 수능 예문 등 선택 컬럼 방어
                     for col in ['example_en', 'example_ko']:
                         if col not in df.columns:
                             df[col] = ""
@@ -2151,13 +2287,11 @@ def page_library() -> None:
                     if 'importance' not in df.columns:
                         df['importance'] = 2
                     
-                    # DB 적재
                     added_cnt = 0
                     today_str = str(date.today())
                     
                     with get_conn() as conn:
                         for _, row in df.iterrows():
-                            # SQLite UNIQUE 제약 방어 삽입
                             cursor = conn.execute("""
                                 INSERT OR IGNORE INTO vocabulary 
                                 (word, meaning, part_of_speech, example_en, example_ko, importance, emoji, day_number)
@@ -2167,7 +2301,7 @@ def page_library() -> None:
                             if cursor.rowcount > 0:
                                 word_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                                 conn.execute("""
-                                    INSERT OR IGNORE INTO user_progress (word_id, next_review_date)
+                                    INSERT OR IGNORE INTO word_progress (word_id, next_review_date)
                                     VALUES (?, ?)
                                 """, (word_id, today_str))
                                 added_cnt += 1
@@ -2178,10 +2312,11 @@ def page_library() -> None:
                                f"• 중복 제거 후 데이터 수: {after_len}개\n"
                                f"• 실제로 DB에 새로 추가된 단어: {added_cnt}개 (기존 중복 제외)")
                     
-                    # 동기화 갱신
                     day_words, review_words = load_today_words(ss.current_day)
                     ss.all_words = day_words + review_words
                     ss.review_words_count = len(review_words)
+                    
+                    update_user_streak_and_mastered()
                     
             except Exception as e:
                 st.error(f"❌ 파일을 파싱하거나 DB에 업로드하는 동안 오류가 발생했습니다: {e}")
@@ -2189,7 +2324,7 @@ def page_library() -> None:
     render_bottom_nav("library")
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑭ PAGE: STATS
+#  ⑮ PAGE: STATS
 # ══════════════════════════════════════════════════════════════════
 def page_stats() -> None:
     ss = st.session_state
@@ -2241,7 +2376,7 @@ def page_stats() -> None:
     render_bottom_nav("stats")
 
 # ══════════════════════════════════════════════════════════════════
-#  ⑮ MAIN ROUTER
+#  ⑯ MAIN ROUTER
 # ══════════════════════════════════════════════════════════════════
 def main() -> None:
     init_db()
